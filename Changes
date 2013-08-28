@@ -1,2 +1,3 @@
 ${NEXT}
+   * better dist.ini
    * Initial version, forked from Riak::Light (dams)
