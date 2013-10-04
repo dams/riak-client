@@ -23,15 +23,9 @@ has host    => ( is => 'ro', isa => Str,  required => 1 );
 has r       => ( is => 'ro', isa => Int,  default  => sub {2} );
 has w       => ( is => 'ro', isa => Int,  default  => sub {2} );
 has dw      => ( is => 'ro', isa => Int,  default  => sub {2} );
-has autodie => ( is => 'ro', isa => Bool, default  => sub {1}, trigger => 1 );
 has timeout => ( is => 'ro', isa => Num,  default  => sub {0.5} );
 has in_timeout  => ( is => 'lazy', trigger => 1 );
 has out_timeout => ( is => 'lazy', trigger => 1 );
-
-sub _trigger_autodie {
-  my ($self, $value) = @_;
-  carp "autodie will be disable in the next version" unless $value;
-}
 
 sub _trigger_in_timeout {
   carp "this feature will be disabled in the next version, you should use just timeout instead";
@@ -285,9 +279,6 @@ sub _parse_response {
     my $key          = $args{key};
     my $callback = $args{callback};
     
-    $self->autodie
-      or undef $@;    ## no critic (RequireLocalizedPunctuationVars)
-
     $self->driver->perform_request(
         code => $request_code,
         body => $request_body
@@ -416,7 +407,7 @@ sub _process_generic_error {
 
     my $error_message = "Error in '$operation' $extra: $error";
 
-    croak $error_message if $self->autodie;
+    croak $error_message;
 
     $@ = $error_message;    ## no critic (RequireLocalizedPunctuationVars)
 
@@ -471,8 +462,7 @@ Riak::Client is a very light (and fast) Perl client for Riak using PBC
 interface. Support operations like ping, get, exists, put, del, and secondary
 indexes (so-called 2i) setting and querying.
 
-It is flexible to change the timeout backend for I/O operations and can
-suppress 'die' in case of error (autodie) using the configuration. There is no
+It is flexible to change the timeout backend for I/O operations. There is no
 auto-reconnect option. It can be very easily wrapped up by modules like
 L<Action::Retry> to manage flexible retry/reconnect strategies.
 
@@ -497,10 +487,6 @@ W value setting for this client. Default 2.
 =head3 dw
 
 DW value setting for this client. Default 2.
-
-=head3 autodie
-
-Boolean, if false each operation will return undef in case of error (stored in $@). Default is true.
 
 =head3 timeout
 

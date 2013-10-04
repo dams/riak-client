@@ -1,3 +1,5 @@
 {{$NEXT}}
+   * removed the autodie option
+   * added pbc protocol
    * better dist.ini
    * Initial version, forked from Riak::Light (dams)

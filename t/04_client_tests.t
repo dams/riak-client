@@ -23,7 +23,7 @@ subtest "exists" => sub {
         $mock->set_always( read_response => $mock_response );
 
         my $client = Riak::Client->new(
-            host   => 'host', port => 1234, autodie => 1,
+            host   => 'host', port => 1234,
             driver => $mock
         );
 
@@ -49,7 +49,7 @@ subtest "exists" => sub {
         $mock->set_always( read_response => $mock_response );
 
         my $client = Riak::Client->new(
-            host   => 'host', port => 1234, autodie => 1,
+            host   => 'host', port => 1234,
             driver => $mock
         );
 
@@ -74,7 +74,7 @@ subtest "ping" => sub {
 
 
         my $client = Riak::Client->new(
-            host   => 'host', port => 1234, autodie => 1,
+            host   => 'host', port => 1234,
             driver => $mock
         );
 
@@ -90,7 +90,7 @@ subtest "ping" => sub {
         $mock->set_false('read_response');
 
         my $client = Riak::Client->new(
-            host   => 'host', port => 1234, autodie => 1,
+            host   => 'host', port => 1234,
             driver => $mock
         );
 
@@ -117,7 +117,7 @@ subtest "ping" => sub {
         $mock->set_always( read_response => $mock_response );
 
         my $client = Riak::Client->new(
-            host   => 'host', port => 1234, autodie => 1,
+            host   => 'host', port => 1234,
             driver => $mock
         );
 
@@ -140,7 +140,7 @@ subtest "ping" => sub {
         $mock->set_always( read_response => $mock_response );
 
         my $client = Riak::Client->new(
-            host   => 'host', port => 1234, autodie => 1,
+            host   => 'host', port => 1234,
             driver => $mock
         );
 
@@ -163,7 +163,7 @@ subtest "ping" => sub {
         $mock->set_false('perform_request');
 
         my $client = Riak::Client->new(
-            host   => 'host', port => 1234, autodie => 1,
+            host   => 'host', port => 1234,
             driver => $mock
         );
 
@@ -199,7 +199,7 @@ subtest "get" => sub {
         $mock->set_always( read_response => $mock_response );
 
         my $client = Riak::Client->new(
-            host   => 'host', port => 1234, autodie => 1,
+            host   => 'host', port => 1234,
             driver => $mock
         );
 
@@ -236,7 +236,7 @@ subtest "get" => sub {
         $mock->set_always( read_response => $mock_response );
 
         my $client = Riak::Client->new(
-            host   => 'host', port => 1234, autodie => 1,
+            host   => 'host', port => 1234,
             driver => $mock
         );
 
@@ -262,7 +262,7 @@ subtest "get" => sub {
         $mock->set_always( read_response => $mock_response );
 
         my $client = Riak::Client->new(
-            host   => 'host', port => 1234, autodie => 1,
+            host   => 'host', port => 1234,
             driver => $mock
         );
 
@@ -283,7 +283,7 @@ subtest "get" => sub {
         $mock->set_always( read_response => $mock_response );
 
         my $client = Riak::Client->new(
-            host   => 'host', port => 1234, autodie => 1,
+            host   => 'host', port => 1234,
             driver => $mock
         );
 
@@ -302,7 +302,7 @@ subtest "get" => sub {
         $mock->set_always( read_response => $mock_response );
 
         my $client = Riak::Client->new(
-            host   => 'host', port => 1234, autodie => 1,
+            host   => 'host', port => 1234,
             driver => $mock
         );
 
@@ -327,7 +327,7 @@ subtest "put" => sub {
         $mock->set_always( read_response => $mock_response );
 
         my $client = Riak::Client->new(
-            host   => 'host', port => 1234, autodie => 1,
+            host   => 'host', port => 1234,
             driver => $mock
         );
 
@@ -351,7 +351,7 @@ subtest "put" => sub {
         $mock->set_always( read_response => $mock_response );
 
         my $client = Riak::Client->new(
-            host   => 'host', port => 1234, autodie => 1,
+            host   => 'host', port => 1234,
             driver => $mock
         );
 
@@ -378,7 +378,7 @@ subtest "put" => sub {
         $mock->set_always( read_response => $mock_response );
 
         my $client = Riak::Client->new(
-            host   => 'host', port => 1234, autodie => 1,
+            host   => 'host', port => 1234,
             driver => $mock
         );
         my $hash = { foo => 123 };
@@ -403,7 +403,7 @@ subtest "del" => sub {
         $mock->set_always( read_response => $mock_response );
 
         my $client = Riak::Client->new(
-            host   => 'host', port => 1234, autodie => 1,
+            host   => 'host', port => 1234,
             driver => $mock
         );
 
@@ -420,7 +420,7 @@ subtest "del" => sub {
         $mock->set_always( read_response => $mock_response );
 
         my $client = Riak::Client->new(
-            host   => 'host', port => 1234, autodie => 1,
+            host   => 'host', port => 1234,
             driver => $mock
         );
 
@@ -446,7 +446,7 @@ subtest "get_keys" => sub {
         $mock->set_always( 'read_response', $mock_response );
 
         my $client = Riak::Client->new(
-            host   => 'host', port => 1234, autodie => 1,
+            host   => 'host', port => 1234,
             driver => $mock
         );
 
@@ -475,7 +475,7 @@ subtest "get_keys" => sub {
         $mock->set_always( 'read_response', $mock_response );
 
         my $client = Riak::Client->new(
-            host   => 'host', port => 1234, autodie => 1,
+            host   => 'host', port => 1234,
             driver => $mock
         );
 
@@ -509,7 +509,7 @@ subtest "get_keys" => sub {
         $mock->set_series( 'read_response', $mock_response1, $mock_response2 );
 
         my $client = Riak::Client->new(
-            host   => 'host', port => 1234, autodie => 1,
+            host   => 'host', port => 1234,
             driver => $mock
         );
 
