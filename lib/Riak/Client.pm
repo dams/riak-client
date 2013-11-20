@@ -59,28 +59,22 @@ sub BUILD {
 }
 
 # error
-const my $ERROR_RESPONSE_CODE    => 0;
-
+const my $ERROR_RESPONSE_CODE       => 0;
 # ping
-const my $PING_REQUEST_CODE       => 1;
-const my $PING_RESPONSE_CODE      => 2;
-
+const my $PING_REQUEST_CODE         => 1;
+const my $PING_RESPONSE_CODE        => 2;
 # get, get_raw
-const my $GET_REQUEST_CODE       => 9;
-const my $GET_RESPONSE_CODE      => 10;
-
+const my $GET_REQUEST_CODE          => 9;
+const my $GET_RESPONSE_CODE         => 10;
 # put, put_raw
-const my $PUT_REQUEST_CODE      => 11;
-const my $PUT_RESPONSE_CODE     => 12;
-
+const my $PUT_REQUEST_CODE          => 11;
+const my $PUT_RESPONSE_CODE         => 12;
 # get_keys
-const my $GET_KEYS_REQUEST_CODE  => 17;
-const my $GET_KEYS_RESPONSE_CODE => 18;
-
+const my $GET_KEYS_REQUEST_CODE     => 17;
+const my $GET_KEYS_RESPONSE_CODE    => 18;
 # del, del
-const my $DEL_REQUEST_CODE      => 13;
-const my $DEL_RESPONSE_CODE     => 14;
-
+const my $DEL_REQUEST_CODE          => 13;
+const my $DEL_RESPONSE_CODE         => 14;
 # quesry_index
 const my $QUERY_INDEX_REQUEST_CODE  => 25;
 const my $QUERY_INDEX_RESPONSE_CODE => 26;
