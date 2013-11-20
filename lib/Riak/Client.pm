@@ -295,26 +295,11 @@ sub get_bucket_props {
 }
 
 sub set_bucket_props {
-    state $check = compile(Any, Str, HashRef);
+    state $check = compile(Any, Str, Dict[ n_val => Optional[Int], allow_mult => Optional[Bool] ]);
     my ( $self, $bucket, $props ) = $check->(@_);
+    $props->{n_val} && $props->{n_val} < 0 and croak 'n_val should be possitive integer';
 
-    # need aditional checks to verify RpbBucketProps format
-    # message RpbBucketProps {
-    #     optional uint32 n_val = 1;
-    #     optional bool allow_mult = 2;
-    # }
-    state $check_props = compile(Optional[Int], Optional[Bool]);
-    my ( $n_val, $allow_mult ) = $check_props->($props->{n_val}, $props->{allow_mult});
-    $n_val < 0 and croak 'allow_mult should be possitive integer';
-
-    my $body = RpbSetBucketReq->encode({
-        bucket => $bucket,
-        props => {
-            n_val      => $n_val,
-            allow_mult => $allow_mult,
-        },
-    });
-
+    my $body = RpbSetBucketReq->encode({ bucket => $bucket, props => $props });
     $self->_parse_response(
         operation => $SET_BUCKET_PROPS,
         bucket    => $bucket,
