@@ -1,6 +1,4 @@
-## no critic (RequireUseStrict, RequireUseWarnings)
 package Riak::Client::Connector;
-## use critic
 
 use Moo;
 use Types::Standard -types;
@@ -39,17 +37,17 @@ sub _send_all {
 
     my $length = bytes::length($bytes);
     my $offset = 0;
-    my $sended = 0;
+    my $sent = 0;
     do {
-        $sended = $self->socket->syswrite( $bytes, $length, $offset );
+        $sent = $self->socket->syswrite( $bytes, $length, $offset );
 
         # error in $!
-        return unless defined $sended;
+        return unless defined $sent;
 
-        # test if $sended == 0 and $! EAGAIN, EWOULDBLOCK, ETC...
-        return unless $sended;
+        # TODO test if $sent == 0 and $! EAGAIN, EWOULDBLOCK, ETC...
+        return unless $sent;
 
-        $offset += $sended;
+        $offset += $sent;
     } while ( $offset < $length );
 
     $offset;
@@ -60,26 +58,20 @@ sub _read_all {
 
     my $buffer;
     my $offset = 0;
-    my $readed = 0;
+    my $read = 0;
     do {
-        $readed = $self->socket->sysread( $buffer, $bufsiz, $offset );
+        $read = $self->socket->sysread( $buffer, $bufsiz, $offset );
 
         # error in $!
-        return unless defined $readed;
+        return unless defined $read;
 
-        # test if $sended == 0 and $! EAGAIN, EWOULDBLOCK, ETC...
-        return unless $readed;
+        # test if $read == 0 and $! EAGAIN, EWOULDBLOCK, ETC...
+        return unless $read;
 
-        $offset += $readed;
+        $offset += $read;
     } while ( $offset < $bufsiz );
 
     $buffer;
 }
 
 1;
-
-__END__
-
-=head1 DESCRIPTION
-  
-  Internal class

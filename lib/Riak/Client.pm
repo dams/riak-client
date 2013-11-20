@@ -255,8 +255,8 @@ sub _parse_response {
     my $callback = $args{callback};
     
     $self->driver->perform_request(
-        code => $request_code,
-        body => $request_body
+        $request_code,
+        $request_body
       )
       or return $self->_process_generic_error(
         $ERRNO, $operation, $bucket,
@@ -344,6 +344,11 @@ sub _parse_response {
 }
 
 
+
+
+
+
+
 sub _parse_response2 {
     my ( $self, %args ) = @_;
     
@@ -359,8 +364,7 @@ sub _parse_response2 {
     my $callback = $args{callback};
     
     $self->driver->perform_request(
-        code => $request_code,
-        body => $request_body
+        $request_code, $request_body
       )
       or return $self->_process_generic_error(
         $ERRNO, $operation_name, $bucket,
@@ -374,8 +378,7 @@ sub _parse_response2 {
     my @results;
     while (1) {
         # get and check response
-        $response = $self->driver->read_response()
-          // { code => -1, body => undef, error => $ERRNO };
+        $response = $self->driver->read_response();
 
         my ($response_code, $response_body, $response_error) = @{$response}{qw(code body error)};
 
@@ -399,7 +402,6 @@ sub _parse_response2 {
         }
 
 
-    
         # in case of default message
         $response_code != $expected_code
           and return $self->_process_generic_error(
