@@ -125,6 +125,35 @@ sub exists {
     defined $self->_fetch( $bucket, $key, 0, 1 );
 }
 
+sub _process_get_response {
+    my ( $self, $encoded_message, $bucket, $key, $decode ) = @_;
+
+    defined $encoded_message
+      or $self->_die_generic_error( "Undefined Message", 'get', $bucket, $key );
+
+    my $should_decode   = $decode;
+    my $decoded_message = RpbGetResp->decode($encoded_message);
+
+    my $content = $decoded_message->content;
+
+    # empty content
+    ref($content) eq 'ARRAY'
+      or return undef;
+
+
+    # TODO: handle metadata
+    my $value        = $content->[0]->value;
+    my $content_type = $content->[0]->content_type;
+
+    # if we need to decode
+    $content_type eq 'application/json' && $should_decode
+      and return decode_json($value);
+
+    # simply return the value
+    return $value;
+
+}
+
 sub _fetch {
     my ( $self, $bucket, $key, $decode, $head ) = @_;
 
@@ -144,8 +173,11 @@ sub _fetch {
         operation_name => 'get',
         body      => $body,
         decode    => $decode,
+
+        handle_response => \&_process_get_response,
     );
 }
+
 
 sub put_raw {
     state $check = compile(Any, Str, Str, Any, Optional[Str], Optional[HashRef[Str]]);
@@ -258,7 +290,7 @@ sub _parse_response {
         $request_code,
         $request_body
       )
-      or return $self->_process_generic_error(
+      or return $self->_die_generic_error(
         $ERRNO, $operation, $bucket,
         $key
       );
@@ -270,14 +302,13 @@ sub _parse_response {
     my @results;
     while (1) {
         # get and check response
-        $response = $self->driver->read_response()
-          // { code => -1, body => undef, error => $ERRNO };
+        $response = $self->driver->read_response();
 
         my ($response_code, $response_body, $response_error) = @{$response}{qw(code body error)};
 
         # in case of internal error message
         defined $response_error
-          and return $self->_process_generic_error(
+          and return $self->_die_generic_error(
               $response_error, $operation, $bucket,
               $key
           );
@@ -289,7 +320,7 @@ sub _parse_response {
             my $errmsg  = $decoded_message->errmsg;
             my $errcode = $decoded_message->errcode;
 
-            return $self->_process_generic_error( "Riak Error (code: $errcode) '$errmsg'",
+            return $self->_die_generic_error( "Riak Error (code: $errcode) '$errmsg'",
                                                   $operation, $bucket, $key
                                                 );
         }
@@ -298,14 +329,14 @@ sub _parse_response {
     
         # in case of default message
         $response_code != $expected_code
-          and return $self->_process_generic_error(
+          and return $self->_die_generic_error(
               "Unexpected Response Code in (got: $response_code, expected: $expected_code)",
               $operation, $bucket, $key
           );
     
-        # we have a 'get' response
-        $response_code == $GET_RESPONSE_CODE
-          and return $self->_process_get_response( $response_body, $bucket, $key, $decode );
+#        # we have a 'get' response
+#        $response_code == $GET_RESPONSE_CODE
+#          and return $self->_process_get_response( $response_body, $bucket, $key, $decode );
 
         # we have a 'get_keys' response
         # TODO: support for 1.4 (which provides 'stream', 'return_terms', and 'stream')
@@ -362,11 +393,13 @@ sub _parse_response2 {
     my $bucket       = $args{bucket};
     my $key          = $args{key};
     my $callback = $args{callback};
+
+    my $handle_response = $args{handle_response};
     
     $self->driver->perform_request(
         $request_code, $request_body
       )
-      or return $self->_process_generic_error(
+      or return $self->_die_generic_error(
         $ERRNO, $operation_name, $bucket,
         $key
       );
@@ -384,7 +417,7 @@ sub _parse_response2 {
 
         # in case of internal error message
         defined $response_error
-          and return $self->_process_generic_error(
+          and return $self->_die_generic_error(
               $response_error, $operation_name, $bucket,
               $key
           );
@@ -396,7 +429,7 @@ sub _parse_response2 {
             my $errmsg  = $decoded_message->errmsg;
             my $errcode = $decoded_message->errcode;
 
-            return $self->_process_generic_error( "Riak Error (code: $errcode) '$errmsg'",
+            return $self->_die_generic_error( "Riak Error (code: $errcode) '$errmsg'",
                                                   $operation_name, $bucket, $key
                                                 );
         }
@@ -404,14 +437,28 @@ sub _parse_response2 {
 
         # in case of default message
         $response_code != $expected_code
-          and return $self->_process_generic_error(
+          and return $self->_die_generic_error(
               "Unexpected Response Code in (got: $response_code, expected: $expected_code)",
               $operation_name, $bucket, $key
           );
     
-        # we have a 'get' response
-        $response_code == $GET_RESPONSE_CODE
-          and return $self->_process_get_response( $response_body, $bucket, $key, $decode );
+
+
+        # handle the response.
+        my $ret;
+        eval { $ret = $handle_response->(
+                        $response_code,
+                        $response_body,
+                        $bucket,
+                        $key,
+                        $decode );
+                1; }
+          and return $ret;
+
+        # there were an exception. Is it a continuation or a real exception ?
+        $@ eq '__RELOOP__'
+          or die $@;
+
 
         # we have a 'get_keys' response
         # TODO: support for 1.4 (which provides 'stream', 'return_terms', and 'stream')
@@ -450,36 +497,7 @@ sub _parse_response2 {
 }
 
 
-
-
-
-
-
-
-
-sub _process_get_response {
-    my ( $self, $encoded_message, $bucket, $key, $decode ) = @_;
-
-    $self->_process_generic_error( "Undefined Message", 'get', $bucket, $key )
-      unless ( defined $encoded_message );
-
-    my $should_decode   = $decode;
-    my $decoded_message = RpbGetResp->decode($encoded_message);
-
-    my $content = $decoded_message->content;
-    if ( ref($content) eq 'ARRAY' ) {
-        my $value        = $content->[0]->value;
-        my $content_type = $content->[0]->content_type;
-
-        return ( $content_type eq 'application/json' and $should_decode )
-          ? decode_json($value)
-          : $value;
-    }
-
-    undef;
-}
-
-sub _process_generic_error {
+sub _die_generic_error {
     my ( $self, $error, $operation_name, $bucket, $key ) = @_;
 
     my $extra = '';
