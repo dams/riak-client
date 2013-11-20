@@ -29,8 +29,7 @@ sub perform_request {
     my $request_body = $request{body};
     my $request_code = $request{code};
 
-    my $message = defined $request_body ? pack( 'c a*', $request_code, $request_body )
-                                        : pack( 'c', $request_code );
+    my $message = pack( 'c a*', $request_code, $request_body // '' );
 
     $self->connector->perform_request($message);
 }
