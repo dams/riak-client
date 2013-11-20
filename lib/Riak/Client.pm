@@ -23,31 +23,7 @@ has host    => ( is => 'ro', isa => Str,  required => 1 );
 has r       => ( is => 'ro', isa => Int,  default  => sub {2} );
 has w       => ( is => 'ro', isa => Int,  default  => sub {2} );
 has dw      => ( is => 'ro', isa => Int,  default  => sub {2} );
-has timeout => ( is => 'ro', isa => Num,  default  => sub {0.5} );
-has in_timeout  => ( is => 'lazy', trigger => 1 );
-has out_timeout => ( is => 'lazy', trigger => 1 );
-
-sub _trigger_in_timeout {
-  carp "this feature will be disabled in the next version, you should use just timeout instead";
-}
-
-sub _trigger_out_timeout {
-  carp "this feature will be disabled in the next version, you should use just timeout instead";
-}
-
-sub _build_in_timeout {
-    $_[0]->timeout;
-}
-
-sub _build_out_timeout {
-    $_[0]->timeout;
-}
-
-has timeout_provider => (
-    is => 'ro',
-    isa => Maybe [Str],
-    default => sub {'Riak::Client::Timeout::Select'}
-);
+has connection_timeout => ( is => 'ro', isa => Num,  default  => sub {0.5} );
 
 has driver => ( is => 'lazy' );
 
@@ -64,23 +40,16 @@ sub _build_socket {
     my $socket = IO::Socket::INET->new(
         PeerHost => $host,
         PeerPort => $port,
-        Timeout  => $self->timeout,
+        Timeout  => $self->connection_timeout,
     );
 
     croak "Error ($!), can't connect to $host:$port"
       unless defined $socket;
 
-    return $socket unless defined $self->timeout_provider;
 
-    use Module::Load qw(load);
-    load $self->timeout_provider;
+    # TODO: handle timeout properly
 
-    # TODO: add a easy way to inject this proxy
-    $self->timeout_provider->new(
-        socket      => $socket,
-        in_timeout  => $self->in_timeout,
-        out_timeout => $self->out_timeout,
-    );
+    return $socket;
 }
 
 sub BUILD {
@@ -462,10 +431,6 @@ Riak::Client is a very light (and fast) Perl client for Riak using PBC
 interface. Support operations like ping, get, exists, put, del, and secondary
 indexes (so-called 2i) setting and querying.
 
-It is flexible to change the timeout backend for I/O operations. There is no
-auto-reconnect option. It can be very easily wrapped up by modules like
-L<Action::Retry> to manage flexible retry/reconnect strategies.
-
 =head2 ATTRIBUTES
 
 =head3 host
@@ -490,52 +455,7 @@ DW value setting for this client. Default 2.
 
 =head3 timeout
 
-Timeout for connection, write and read operations. Default is 0.5 seconds.
-
-=head3 in_timeout
-
-Timeout for read operations. Default is timeout value.
-
-=head3 out_timeout
-
-Timeout for write operations. Default is timeout value.
-
-=head3 timeout_provider
-
-Can change the backend for timeout. The default value is IO::Socket::INET and
-there is only support to connection timeout.
-
-B<IMPORTANT>: in case of any timeout error, the socket between this client and the
-Riak server will be closed. To support I/O timeout you can choose 5 options (or
-you can set undef to avoid IO Timeout):
-
-=over  
-
-=item * Riak::Client::Timeout::Alarm
-
-uses alarm and Time::HiRes to control the I/O timeout. Does not work on Win32.
-(Not Safe)
-
-=item * Riak::Client::Timeout::Time::Out
-
-uses Time::Out and Time::HiRes to control the I/O timeout. Does not work on
-Win32. (Not Safe)
-
-=item *  Riak::Client::Timeout::Select
-
-uses IO::Select to control the I/O timeout
-
-=item *  Riak::Client::Timeout::SelectOnWrite
-
-uses IO::Select to control only Output Operations. Can block in Write
-Operations. Be Careful.
-
-=item *  Riak::Client::Timeout::SetSockOpt
-
-uses setsockopt to set SO_RCVTIMEO and SO_SNDTIMEO socket properties. Does not
-Work on NetBSD 6.0.
-
-=back
+Timeout for socket connection operation.
 
 =head3 driver
 
