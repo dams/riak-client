@@ -1,6 +1,7 @@
 package Riak::Client::Connector;
 
 use Moo;
+use Errno qw(EINTR);
 use Types::Standard -types;
 require bytes;
 
@@ -38,40 +39,44 @@ sub _send_all {
     my $length = bytes::length($bytes);
     my $offset = 0;
     my $sent = 0;
-    do {
+
+    while ($length > 0) {
         $sent = $self->socket->syswrite( $bytes, $length, $offset );
-
-        # error in $!
-        return unless defined $sent;
-
-        # TODO test if $sent == 0 and $! EAGAIN, EWOULDBLOCK, ETC...
-        return unless $sent;
+        if (not defined $sent) {
+            next if $! == EINTR;
+            return;
+        } elsif ($sent <= 0) {
+            return;
+        }
 
         $offset += $sent;
-    } while ( $offset < $length );
+        $length -= $sent;
+    }
 
-    $offset;
+    return $offset;
 }
 
 sub _read_all {
-    my ( $self, $bufsiz ) = @_;
+    my ( $self, $length ) = @_;
 
     my $buffer;
     my $offset = 0;
     my $read = 0;
-    do {
-        $read = $self->socket->sysread( $buffer, $bufsiz, $offset );
 
-        # error in $!
-        return unless defined $read;
-
-        # test if $read == 0 and $! EAGAIN, EWOULDBLOCK, ETC...
-        return unless $read;
+    while ($length > 0) {
+        $read = $self->socket->sysread( $buffer, $length, $offset );
+        if (not defined $read) {
+            next if $! == EINTR;
+            return;
+        } elsif ($read <= 0) {
+            return;
+        }
 
         $offset += $read;
-    } while ( $offset < $bufsiz );
+        $length -= $read;
+    }
 
-    $buffer;
+    return $buffer;
 }
 
 1;
