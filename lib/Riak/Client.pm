@@ -397,7 +397,7 @@ sub _parse_response {
         # handle the response.
         my $ret;
         eval { $ret = $handle_response->(
-                        $response_code,
+                        $self,
                         $response_body,
                         $bucket,
                         $key,
