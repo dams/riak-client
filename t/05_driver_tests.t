@@ -13,7 +13,7 @@ subtest "should call perform_request and return a valid value" => sub {
     $mock->set_true('perform_request');
     $mock->mock( read_response => sub { pack( 'c a*', 2, q(lol) ) } );
 
-    $driver->perform_request( body => q(), code => 1 );
+    $driver->perform_request( 1, q() );
     is_deeply(
         $driver->read_response(),
         { error => undef, code => 2, body => q(lol) }
@@ -30,7 +30,7 @@ subtest "should call perform_request and return a valid value" => sub {
     $mock->set_false('read_response');
     $! = ETIMEDOUT;
 
-    $driver->perform_request( body => q(), code => 1 );
+    $driver->perform_request( 1, q() );
     is_deeply(
         $driver->read_response(),
         { error => strerror(ETIMEDOUT), code => -1, body => undef }
@@ -47,7 +47,7 @@ subtest "should call perform_request and EOF" => sub {
     $mock->set_false('read_response');
     $! = 0;
 
-    $driver->perform_request( body => q(), code => 1 );
+    $driver->perform_request( 1, q() );
     is_deeply(
         $driver->read_response(),
         { error => "Socket Closed", code => -1, body => undef }

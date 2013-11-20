@@ -27,6 +27,8 @@ has connection_timeout => ( is => 'ro', isa => Num,  default  => sub {0.5} );
 
 has driver => ( is => 'lazy' );
 
+has _request_accumulator => (is => 'rw', init_arg => undef);
+
 sub _build_driver {
     Riak::Client::Driver->new( socket => $_[0]->_build_socket() );
 }
@@ -56,31 +58,32 @@ sub BUILD {
     $_[0]->driver;
 }
 
-const my $PING     => 'ping';
-const my $GET      => 'get';
-const my $PUT      => 'put';
-const my $DEL      => 'del';
-const my $GET_KEYS => 'get_keys';
-const my $QUERY_INDEX => 'query_index';
-
-const my $ERROR_RESPONSE_CODE    => 0;
-const my $GET_RESPONSE_CODE      => 10;
-const my $GET_KEYS_RESPONSE_CODE => 18;
+# error
+const my $ERROR_RESPONSE_CODE       => 0;
+# ping
+const my $PING_REQUEST_CODE         => 1;
+const my $PING_RESPONSE_CODE        => 2;
+# get, get_raw
+const my $GET_REQUEST_CODE          => 9;
+const my $GET_RESPONSE_CODE         => 10;
+# put, put_raw
+const my $PUT_REQUEST_CODE          => 11;
+const my $PUT_RESPONSE_CODE         => 12;
+# get_keys
+const my $GET_KEYS_REQUEST_CODE     => 17;
+const my $GET_KEYS_RESPONSE_CODE    => 18;
+# del, del
+const my $DEL_REQUEST_CODE          => 13;
+const my $DEL_RESPONSE_CODE         => 14;
+# quesry_index
+const my $QUERY_INDEX_REQUEST_CODE  => 25;
 const my $QUERY_INDEX_RESPONSE_CODE => 26;
 
-const my $CODES => {
-        $PING     => { request_code => 1,  response_code => 2 },
-        $GET      => { request_code => 9,  response_code => 10 },
-        $PUT      => { request_code => 11, response_code => 12 },
-        $DEL      => { request_code => 13, response_code => 14 },
-        $GET_KEYS => { request_code => 17, response_code => 18 },
-        $QUERY_INDEX => { request_code => 25, response_code => 26 },
-    };
-
-
 sub ping {
-    $_[0]->_parse_response(
-        operation => $PING,
+    $_[0]->_parse_response2(
+        request_code  => $PING_REQUEST_CODE,
+        expected_code => $PING_RESPONSE_CODE,
+        operation_name => 'ping',
         body      => q(),
     );
 }
@@ -93,14 +96,38 @@ sub get_keys {
     state $check = compile(Any, Str, Optional[CodeRef]);
     my ( $self, $bucket, $callback ) = $check->(@_);
 
+    # reset accumulator
+    $self->_request_accumulator([]);
     my $body = RpbListKeysReq->encode( { bucket => $bucket } );
-    $self->_parse_response(
-        key       => "*",
-        bucket    => $bucket,
-        operation => $GET_KEYS,
-        body      => $body,
-        callback => $callback,
+    $self->_parse_response2(
+        request_code   => $GET_KEYS_REQUEST_CODE,
+        expected_code  => $GET_KEYS_RESPONSE_CODE,
+        key            => "*",
+        bucket         => $bucket,
+        operation_name => 'get_keys',
+        body           => $body,
+        callback       => $callback,
+        handle_response => \&_handle_get_keys_response
     );
+}
+
+sub _handle_get_keys_response {
+    my ( $self, $encoded_message, $bucket, $key, $callback ) = @_;
+
+    # TODO: support for 1.4 (which provides 'stream', 'return_terms', and 'stream')
+    my $obj = RpbListKeysResp->decode( $encoded_message );
+    my @keys = @{$obj->keys // []};
+    if ($callback) {
+        $callback->($_) foreach @keys;
+        $obj->done
+          and return;
+    } else {
+        push @{$self->_request_accumulator}, @keys;
+        $obj->done
+          and return $self->_request_accumulator;
+    }
+    # continuation
+    die bless \do { my $e }, '__RELOOP__';
 }
 
 sub get_raw {
@@ -132,14 +159,49 @@ sub _fetch {
         }
     );
 
-    $self->_parse_response(
+    $self->_parse_response2(
+        request_code  => $GET_REQUEST_CODE,
+        expected_code => $GET_RESPONSE_CODE,
         key       => $key,
         bucket    => $bucket,
-        operation => $GET,
+        operation_name => 'get',
         body      => $body,
         decode    => $decode,
+
+        handle_response => \&_handle_get_response,
     );
 }
+
+sub _handle_get_response {
+    my ( $self, $encoded_message, $bucket, $key, undef, $decode ) = @_;
+
+    defined $encoded_message
+      or $self->_die_generic_error( "Undefined Message", 'get', $bucket, $key );
+
+    my $should_decode   = $decode;
+    my $decoded_message = RpbGetResp->decode($encoded_message);
+
+    my $content = $decoded_message->content;
+
+    # empty content
+    ref($content) eq 'ARRAY'
+      or return undef;
+
+
+    # TODO: handle metadata
+    my $value        = $content->[0]->value;
+    my $content_type = $content->[0]->content_type;
+
+    # if we need to decode
+    $content_type eq 'application/json' && $should_decode
+      and return decode_json($value);
+
+    # simply return the value
+    return $value;
+
+}
+
+
 
 sub put_raw {
     state $check = compile(Any, Str, Str, Any, Optional[Str], Optional[HashRef[Str]]);
@@ -179,11 +241,13 @@ sub _store {
         }
     );
 
-    $self->_parse_response(
-        key       => $key,
-        bucket    => $bucket,
-        operation => $PUT,
-        body      => $body,
+    $self->_parse_response2(
+        request_code   => $PUT_REQUEST_CODE,
+        expected_code  => $PUT_RESPONSE_CODE,
+        key            => $key,
+        bucket         => $bucket,
+        operation_name => 'put',
+        body           => $body,
     );
 }
 
@@ -198,189 +262,161 @@ sub del {
         }
     );
 
-    $self->_parse_response(
-        key       => $key,
-        bucket    => $bucket,
-        operation => $DEL,
-        body      => $body,
+    $self->_parse_response2(
+        request_code   => $DEL_REQUEST_CODE,
+        expected_code  => $DEL_RESPONSE_CODE,
+        key            => $key,
+        bucket         => $bucket,
+        operation_name => 'del',
+        body           => $body,
     );
 }
 
 sub query_index {
-     state $check = compile(Any, Str, Str, Str|ArrayRef);
-     my ( $self, $bucket, $index, $value_to_match ) = $check->(@_);
+    state $check = compile(Any, Str, Str, Str|ArrayRef, Optional[CodeRef]);
+    my ( $self, $bucket, $index, $value_to_match, $callback ) = $check->(@_);
 
-     my $query_type = 0; # eq
-     ref $value_to_match
-       and $query_type = 1; # range
-     my $body = RpbIndexReq->encode(
-         {   index    => $index,
-             bucket   => $bucket,
-             qtype    => $query_type,
-             $query_type ?
-             ( range_min => $value_to_match->[0],
-               range_max => $value_to_match->[1] )
-             : (key => $value_to_match ),
-         }
-     );
+    my $query_type_is_eq = 0; # eq
+    ref $value_to_match
+      and $query_type_is_eq = 1; # range
+    my $body = RpbIndexReq->encode(
+        {   index    => $index,
+            bucket   => $bucket,
+            qtype    => $query_type_is_eq,
+            $query_type_is_eq ?
+            ( range_min => $value_to_match->[0],
+              range_max => $value_to_match->[1] )
+            : (key => $value_to_match ),
+            callback => $callback
+        }
+    );
 
-     $self->_parse_response(
-         $query_type ?
-           (key => '2i query on ' . $value_to_match->[0] . '...' . $value_to_match->[1])
-         : (key => $value_to_match ),
-         bucket    => $bucket,
-         operation => $QUERY_INDEX,
-         body      => $body,
-     );
- }
+    $self->_parse_response2(
+        request_code   => $QUERY_INDEX_REQUEST_CODE,
+        expected_code  => $QUERY_INDEX_RESPONSE_CODE,
+        $query_type_is_eq ?
+          (key => '2i query on ' . join('...', @$value_to_match) )
+        : (key => $value_to_match ),
+        bucket    => $bucket,
+        operation_name => 'query_index',
+        body      => $body,
+        handle_response => \&_handle_query_index_response,
+    );
+}
 
-sub _parse_response {
+sub _handle_query_index_response {
+    my ( $self, $encoded_message, $bucket, $key, $callback ) = @_;
+    
+    defined $encoded_message
+      or $self->_die_generic_error( "Undefined Message", 'query_index', $bucket, $key );
+
+    my $obj = RpbIndexResp->decode( $encoded_message );
+
+    my @keys = @{$obj->keys // []};
+    if ($callback) {
+        $callback->($_) foreach @keys;
+        return;
+    } else {
+        return \@keys;
+    }
+
+}
+
+
+sub _parse_response2 {
     my ( $self, %args ) = @_;
     
-    my $operation = $args{operation};
+    my $operation_name = $args{operation_name};
 
-    my $request_code  = $CODES->{$operation}->{request_code};
-    my $expected_code = $CODES->{$operation}->{response_code};
+    my $request_code  = $args{request_code};
+    my $expected_code = $args{expected_code};
 
     my $request_body = $args{body};
     my $decode       = $args{decode};
     my $bucket       = $args{bucket};
     my $key          = $args{key};
     my $callback = $args{callback};
+
+    my $handle_response = $args{handle_response};
     
     $self->driver->perform_request(
-        code => $request_code,
-        body => $request_body
+        $request_code, $request_body
       )
-      or return $self->_process_generic_error(
-        $ERRNO, $operation, $bucket,
+      or return $self->_die_generic_error(
+        $ERRNO, $operation_name, $bucket,
         $key
       );
 
 #    my $done = 0;
 #$expected_code != $GET_KEYS_RESPONSE_CODE;
 
-    my $response;
-    my @results;
     while (1) {
         # get and check response
-        $response = $self->driver->read_response()
-          // { code => -1, body => undef, error => $ERRNO };
+        my $response = $self->driver->read_response();
 
         my ($response_code, $response_body, $response_error) = @{$response}{qw(code body error)};
 
         # in case of internal error message
         defined $response_error
-          and return $self->_process_generic_error(
-              $response_error, $operation, $bucket,
+          and return $self->_die_generic_error(
+              $response_error, $operation_name, $bucket,
               $key
           );
     
         # in case of error msg
-        $response_code == $ERROR_RESPONSE_CODE
-          and return $self->_process_riak_error(
-              $response_body, $operation, $bucket,
-              $key
-          );
-    
+
+        if ($response_code == $ERROR_RESPONSE_CODE) {
+            my $decoded_message = RpbErrorResp->decode($response_body);
+            my $errmsg  = $decoded_message->errmsg;
+            my $errcode = $decoded_message->errcode;
+
+            return $self->_die_generic_error( "Riak Error (code: $errcode) '$errmsg'",
+                                                  $operation_name, $bucket, $key
+                                                );
+        }
+
+
         # in case of default message
         $response_code != $expected_code
-          and return $self->_process_generic_error(
+          and return $self->_die_generic_error(
               "Unexpected Response Code in (got: $response_code, expected: $expected_code)",
-              $operation, $bucket, $key
+              $operation_name, $bucket, $key
           );
     
-        # we have a 'get' response
-        $response_code == $GET_RESPONSE_CODE
-          and return $self->_process_get_response( $response_body, $bucket, $key, $decode );
+        # if we don't need to handle the response, return success
+        $handle_response
+          or return 1;
 
-        # we have a 'get_keys' response
-        # TODO: support for 1.4 (which provides 'stream', 'return_terms', and 'stream')
-        if ($response_code == $GET_KEYS_RESPONSE_CODE) {
-            my $obj = RpbListKeysResp->decode( $response_body );
-            my @keys = @{$obj->keys // []};
-            if ($callback) {
-                $callback->($_) foreach @keys;
-                $obj->done
-                  and return;
-            } else {
-                push @results, @keys;
-                $obj->done
-                  and return \@results;
-            }
-            next;
-        }
+        # handle the response.
+        my $ret;
+        eval { $ret = $handle_response->(
+                        $response_code,
+                        $response_body,
+                        $bucket,
+                        $key,
+                        $callback,
+                        $decode );
+                1; }
+          and return $ret;
 
-        # in case of a 'query_index' response
-        if ($response_code == $QUERY_INDEX_RESPONSE_CODE) {
-            my $obj = RpbIndexResp->decode( $response_body );
-            my @keys = @{$obj->keys // []};
-            if ($callback) {
-                $callback->($_) foreach @keys;
-                return;
-            } else {
-                return \@keys;
-            }
-            next;
-        }
+        # there were an exception. Is it a continuation or a real exception ?
 
-        # in case of no return value, signify success
-        return 1;
+        ref $@ eq '__RELOOP__'
+          or die $@;
+
     }
 
 }
 
-sub _process_get_response {
-    my ( $self, $encoded_message, $bucket, $key, $decode ) = @_;
 
-    $self->_process_generic_error( "Undefined Message", 'get', $bucket, $key )
-      unless ( defined $encoded_message );
+sub _die_generic_error {
+    my ( $self, $error, $operation_name, $bucket, $key ) = @_;
 
-    my $should_decode   = $decode;
-    my $decoded_message = RpbGetResp->decode($encoded_message);
+    my $extra = '';
+    defined $bucket && defined $key
+      and $extra = "(bucket: $bucket, key: $key)";
 
-    my $content = $decoded_message->content;
-    if ( ref($content) eq 'ARRAY' ) {
-        my $value        = $content->[0]->value;
-        my $content_type = $content->[0]->content_type;
-
-        return ( $content_type eq 'application/json' and $should_decode )
-          ? decode_json($value)
-          : $value;
-    }
-
-    undef;
-}
-
-sub _process_riak_error {
-    my ( $self, $encoded_message, $operation, $bucket, $key ) = @_;
-
-    my $decoded_message = RpbErrorResp->decode($encoded_message);
-
-    my $errmsg  = $decoded_message->errmsg;
-    my $errcode = $decoded_message->errcode;
-
-    $self->_process_generic_error(
-        "Riak Error (code: $errcode) '$errmsg'",
-        $operation, $bucket, $key
-    );
-}
-
-sub _process_generic_error {
-    my ( $self, $error, $operation, $bucket, $key ) = @_;
-
-    my $extra =
-      ( $operation ne 'ping' )
-      ? "(bucket: $bucket, key: $key)"
-      : q();
-
-    my $error_message = "Error in '$operation' $extra: $error";
-
-    croak $error_message;
-
-    $@ = $error_message;    ## no critic (RequireLocalizedPunctuationVars)
-
-    undef;
+    croak "Error in '$operation_name' $extra: $error";
 }
 
 1;
@@ -552,7 +588,7 @@ Perform a delete operation. Expects bucket and key names.
 =head3 get_keys
 
   $client->get_keys(foo => sub{
-     my $key = $_[0];
+     my $key = $_; # also in $_[0]
 
      # you should use another client inside this callback!
      $another_client->del(foo => $key);
@@ -568,7 +604,12 @@ skyrocket...
 =head3 query_index
 
 Perform a secondary index query. Expects a bucket name, the index field name,
-and the index value you're searching on. Returns and ArrayRef of matching keys.
+the index value you're searching on, and optionally a callback.
+
+If a callback has been provided, doesn't return anything, but execute the
+callback on each matching keys. callback will receive the key name as first
+argument. key name will also be in $_. If no callback is provided, returns and
+ArrayRef of matching keys.
 
 The index value you're searching on can be of two types. If it's a scalar, an
 B<exact match> query will be performed. if the value is an ArrayRef, then a
@@ -582,6 +623,9 @@ Based on the example in C<put>, here is how to query it:
 
   # range match
   my $matching_keys = $client->query_index( 'bucket',  'field2_int', [ 40, 50] ),
+
+  # range match with callback
+  $client->query_index( 'bucket',  'field2_int', [ 40, 50], sub { print "key : $_" } ),
 
 =head1 SEE ALSO
 

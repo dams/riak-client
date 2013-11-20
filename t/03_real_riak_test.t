@@ -1,5 +1,5 @@
 BEGIN {
-    unless ( $ENV{RIAK_PBC_HOST} ) {
+    unless ( $ENV{RIAK_PBC_HOST} = '127.0.0.1:8087' ) {
         require Test::More;
         Test::More::plan(
             skip_all => 'variable RIAK_PBC_HOST is not defined' );
@@ -24,8 +24,8 @@ subtest "simple get/set/delete test" => sub {
     my $scalar = '3.14159';
     my $hash = { baz => 1024 };
 
-    ok( $client->ping(),     "should can ping" );
-    ok( $client->is_alive(), "should can ping" );
+    ok( $client->ping(),     "can ping" );
+    ok( $client->is_alive(), "is_alive" );
     ok( $client->put( foo => "bar", $hash ),
         "should store the hashref in Riak"
     );
