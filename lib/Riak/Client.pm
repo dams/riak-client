@@ -57,20 +57,24 @@ sub BUILD {
 }
 
 const my $PING     => 'ping';
-const my $GET      => 'get';
 const my $PUT      => 'put';
 const my $DEL      => 'del';
 const my $GET_KEYS => 'get_keys';
 const my $QUERY_INDEX => 'query_index';
 
 const my $ERROR_RESPONSE_CODE    => 0;
+
+# get, get_raw
+const my $GET_REQUEST_CODE       => 9;
 const my $GET_RESPONSE_CODE      => 10;
+
+# get_keys
 const my $GET_KEYS_RESPONSE_CODE => 18;
+
 const my $QUERY_INDEX_RESPONSE_CODE => 26;
 
 const my $CODES => {
         $PING     => { request_code => 1,  response_code => 2 },
-        $GET      => { request_code => 9,  response_code => 10 },
         $PUT      => { request_code => 11, response_code => 12 },
         $DEL      => { request_code => 13, response_code => 14 },
         $GET_KEYS => { request_code => 17, response_code => 18 },
@@ -132,10 +136,12 @@ sub _fetch {
         }
     );
 
-    $self->_parse_response(
+    $self->_parse_response2(
+        request_code  => $GET_REQUEST_CODE,
+        expected_code => $GET_RESPONSE_CODE,
         key       => $key,
         bucket    => $bucket,
-        operation => $GET,
+        operation_name => 'get',
         body      => $body,
         decode    => $decode,
     );
@@ -277,11 +283,18 @@ sub _parse_response {
           );
     
         # in case of error msg
-        $response_code == $ERROR_RESPONSE_CODE
-          and return $self->_process_riak_error(
-              $response_body, $operation, $bucket,
-              $key
-          );
+
+        if ($response_code == $ERROR_RESPONSE_CODE) {
+            my $decoded_message = RpbErrorResp->decode($response_body);
+            my $errmsg  = $decoded_message->errmsg;
+            my $errcode = $decoded_message->errcode;
+
+            return $self->_process_generic_error( "Riak Error (code: $errcode) '$errmsg'",
+                                                  $operation, $bucket, $key
+                                                );
+        }
+
+
     
         # in case of default message
         $response_code != $expected_code
@@ -330,6 +343,118 @@ sub _parse_response {
 
 }
 
+
+sub _parse_response2 {
+    my ( $self, %args ) = @_;
+    
+    my $operation_name = $args{operation_name};
+
+    my $request_code  = $args{request_code};
+    my $expected_code = $args{expected_code};
+
+    my $request_body = $args{body};
+    my $decode       = $args{decode};
+    my $bucket       = $args{bucket};
+    my $key          = $args{key};
+    my $callback = $args{callback};
+    
+    $self->driver->perform_request(
+        code => $request_code,
+        body => $request_body
+      )
+      or return $self->_process_generic_error(
+        $ERRNO, $operation_name, $bucket,
+        $key
+      );
+
+#    my $done = 0;
+#$expected_code != $GET_KEYS_RESPONSE_CODE;
+
+    my $response;
+    my @results;
+    while (1) {
+        # get and check response
+        $response = $self->driver->read_response()
+          // { code => -1, body => undef, error => $ERRNO };
+
+        my ($response_code, $response_body, $response_error) = @{$response}{qw(code body error)};
+
+        # in case of internal error message
+        defined $response_error
+          and return $self->_process_generic_error(
+              $response_error, $operation_name, $bucket,
+              $key
+          );
+    
+        # in case of error msg
+
+        if ($response_code == $ERROR_RESPONSE_CODE) {
+            my $decoded_message = RpbErrorResp->decode($response_body);
+            my $errmsg  = $decoded_message->errmsg;
+            my $errcode = $decoded_message->errcode;
+
+            return $self->_process_generic_error( "Riak Error (code: $errcode) '$errmsg'",
+                                                  $operation_name, $bucket, $key
+                                                );
+        }
+
+
+    
+        # in case of default message
+        $response_code != $expected_code
+          and return $self->_process_generic_error(
+              "Unexpected Response Code in (got: $response_code, expected: $expected_code)",
+              $operation_name, $bucket, $key
+          );
+    
+        # we have a 'get' response
+        $response_code == $GET_RESPONSE_CODE
+          and return $self->_process_get_response( $response_body, $bucket, $key, $decode );
+
+        # we have a 'get_keys' response
+        # TODO: support for 1.4 (which provides 'stream', 'return_terms', and 'stream')
+        if ($response_code == $GET_KEYS_RESPONSE_CODE) {
+            my $obj = RpbListKeysResp->decode( $response_body );
+            my @keys = @{$obj->keys // []};
+            if ($callback) {
+                $callback->($_) foreach @keys;
+                $obj->done
+                  and return;
+            } else {
+                push @results, @keys;
+                $obj->done
+                  and return \@results;
+            }
+            next;
+        }
+
+        # in case of a 'query_index' response
+        if ($response_code == $QUERY_INDEX_RESPONSE_CODE) {
+            my $obj = RpbIndexResp->decode( $response_body );
+            my @keys = @{$obj->keys // []};
+            if ($callback) {
+                $callback->($_) foreach @keys;
+                return;
+            } else {
+                return \@keys;
+            }
+            next;
+        }
+
+        # in case of no return value, signify success
+        return 1;
+    }
+
+}
+
+
+
+
+
+
+
+
+
 sub _process_get_response {
     my ( $self, $encoded_message, $bucket, $key, $decode ) = @_;
 
@@ -352,35 +477,14 @@ sub _process_get_response {
     undef;
 }
 
-sub _process_riak_error {
-    my ( $self, $encoded_message, $operation, $bucket, $key ) = @_;
-
-    my $decoded_message = RpbErrorResp->decode($encoded_message);
-
-    my $errmsg  = $decoded_message->errmsg;
-    my $errcode = $decoded_message->errcode;
-
-    $self->_process_generic_error(
-        "Riak Error (code: $errcode) '$errmsg'",
-        $operation, $bucket, $key
-    );
-}
-
 sub _process_generic_error {
-    my ( $self, $error, $operation, $bucket, $key ) = @_;
+    my ( $self, $error, $operation_name, $bucket, $key ) = @_;
 
-    my $extra =
-      ( $operation ne 'ping' )
-      ? "(bucket: $bucket, key: $key)"
-      : q();
+    my $extra = '';
+    defined $bucket && defined $key
+      and $extra = "(bucket: $bucket, key: $key)";
 
-    my $error_message = "Error in '$operation' $extra: $error";
-
-    croak $error_message;
-
-    $@ = $error_message;    ## no critic (RequireLocalizedPunctuationVars)
-
-    undef;
+    croak "Error in '$operation_name' $extra: $error";
 }
 
 1;
