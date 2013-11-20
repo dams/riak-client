@@ -29,6 +29,10 @@ has driver => ( is => 'lazy' );
 
 has _request_accumulator => (is => 'rw', init_arg => undef);
 
+sub _reloop {
+    die bless \do { my $e }, '__RELOOP__';
+}
+
 sub _build_driver {
     Riak::Client::Driver->new( socket => $_[0]->_build_socket() );
 }
@@ -80,7 +84,7 @@ const my $QUERY_INDEX_REQUEST_CODE  => 25;
 const my $QUERY_INDEX_RESPONSE_CODE => 26;
 
 sub ping {
-    $_[0]->_parse_response2(
+    $_[0]->_parse_response(
         request_code  => $PING_REQUEST_CODE,
         expected_code => $PING_RESPONSE_CODE,
         operation_name => 'ping',
@@ -99,7 +103,7 @@ sub get_keys {
     # reset accumulator
     $self->_request_accumulator([]);
     my $body = RpbListKeysReq->encode( { bucket => $bucket } );
-    $self->_parse_response2(
+    $self->_parse_response(
         request_code   => $GET_KEYS_REQUEST_CODE,
         expected_code  => $GET_KEYS_RESPONSE_CODE,
         key            => "*",
@@ -127,7 +131,7 @@ sub _handle_get_keys_response {
           and return $self->_request_accumulator;
     }
     # continuation
-    die bless \do { my $e }, '__RELOOP__';
+    _reloop();
 }
 
 sub get_raw {
@@ -159,7 +163,7 @@ sub _fetch {
         }
     );
 
-    $self->_parse_response2(
+    $self->_parse_response(
         request_code  => $GET_REQUEST_CODE,
         expected_code => $GET_RESPONSE_CODE,
         key       => $key,
@@ -241,7 +245,7 @@ sub _store {
         }
     );
 
-    $self->_parse_response2(
+    $self->_parse_response(
         request_code   => $PUT_REQUEST_CODE,
         expected_code  => $PUT_RESPONSE_CODE,
         key            => $key,
@@ -262,7 +266,7 @@ sub del {
         }
     );
 
-    $self->_parse_response2(
+    $self->_parse_response(
         request_code   => $DEL_REQUEST_CODE,
         expected_code  => $DEL_RESPONSE_CODE,
         key            => $key,
@@ -291,7 +295,7 @@ sub query_index {
         }
     );
 
-    $self->_parse_response2(
+    $self->_parse_response(
         request_code   => $QUERY_INDEX_REQUEST_CODE,
         expected_code  => $QUERY_INDEX_RESPONSE_CODE,
         $query_type_is_eq ?
@@ -323,7 +327,7 @@ sub _handle_query_index_response {
 }
 
 
-sub _parse_response2 {
+sub _parse_response {
     my ( $self, %args ) = @_;
     
     my $operation_name = $args{operation_name};
@@ -376,7 +380,7 @@ sub _parse_response2 {
         }
 
 
-        # in case of default message
+        # check if we have what we want
         $response_code != $expected_code
           and return $self->_die_generic_error(
               "Unexpected Response Code in (got: $response_code, expected: $expected_code)",
