@@ -1,4 +1,8 @@
 {{$NEXT}}
+
+0.10      2013-11-20 17:29:38 Europe/Amsterdam
+   * almost rewrote it from scratch
+   * a lot of refactoring
    * removed the autodie option
    * added pbc protocol
    * better dist.ini
