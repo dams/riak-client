@@ -127,8 +127,11 @@ sub _handle_get_keys_response {
           and return;
     } else {
         push @{$self->_request_accumulator}, @keys;
-        $obj->done
-          and return $self->_request_accumulator;
+        if ($obj->done) {
+            my $keys = $self->_request_accumulator;
+            $self->_request_accumulator([]);
+            return $keys;
+        }
     }
     # continuation
     _reloop();
@@ -471,6 +474,9 @@ Riak::Client is a very light (and fast) Perl client for Riak using PBC
 interface. Support operations like ping, get, exists, put, del, and secondary
 indexes (so-called 2i) setting and querying.
 
+It started as a for of Riak::Light to fix some bugs, but actually ended up in a
+complete rewrite with more features, but the same performance
+
 =head2 ATTRIBUTES
 
 =head3 host
@@ -640,3 +646,5 @@ L<Data::Riak>
 L<Data::Riak::Fast>
 
 L<Action::Retry>
+
+L<Riak::Light>
