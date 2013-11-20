@@ -6,7 +6,7 @@ BEGIN {
     }
 }
 
-use Test::More tests => 3;
+use Test::More tests => 5;
 use Test::Exception;
 use Riak::Client;
 use JSON;
@@ -120,4 +120,65 @@ subtest "sequence of 1024 get/set" => sub {
             "get($bucket=>$key)should got the same structure"
         );
     }
+};
+
+subtest "get buckets" => sub {
+    plan tests => 4;
+
+    my ( $host, $port ) = split ':', $ENV{RIAK_PBC_HOST};
+
+    my $client = Riak::Client->new(
+        host             => $host, port => $port,
+        timeout_provider => undef
+    );
+
+    my @new_buckets = (
+        "foo_" . int( rand(1024) ) . "_" . int( rand(1024) ),
+        "foo_" . int( rand(1024) ) . "_" . int( rand(1024) ),
+        "foo_" . int( rand(1024) ) . "_" . int( rand(1024) ),
+    );
+
+    my @exp_buckets = ( @{ $client->get_buckets() // [] }, @new_buckets);
+
+    my $key = "key" . int( rand(1024) );
+    my $hash = { a => 1 };
+    $client->put( $_ => $key => $hash ) foreach (@new_buckets);
+
+    my @buckets = @{ $client->get_buckets() // [] };
+
+    is( scalar @buckets, scalar @exp_buckets );
+
+    foreach my $bucket (@new_buckets) {
+        is(grep( $bucket eq $_, @buckets), 1, "bucket $bucket is not found");
+    }
+};
+
+subtest "get/set buckets props" => sub {
+    plan tests => 4;
+
+    my ( $host, $port ) = split ':', $ENV{RIAK_PBC_HOST};
+
+    my $client = Riak::Client->new(
+        host             => $host, port => $port,
+        timeout_provider => undef
+    );
+
+    my @buckets = (
+        "foo_" . int( rand(1024) ) . "_" . int( rand(1024) ),
+        "foo_" . int( rand(1024) ) . "_" . int( rand(1024) ),
+        "foo_" . int( rand(1024) ) . "_" . int( rand(1024) ),
+    );
+
+    my $key = "key" . int( rand(1024) );
+    my $hash = { a => 1 };
+    my $exp_props = { n_val => 1, allow_mult => 0 };
+    foreach (@buckets) {
+        $client->put( $_ => $key => $hash );
+        $client->set_bucket_props($_, $exp_props);
+    }
+
+    my @props = map { $client->get_bucket_props($_) } @buckets;
+
+    is( scalar @props, scalar @buckets);
+    is_deeply($_, $exp_props, "wrong props structure") foreach (@props);
 };

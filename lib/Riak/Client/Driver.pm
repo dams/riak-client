@@ -19,7 +19,7 @@ sub _build_connector {
 sub perform_request {
     my ( $self, $request_code, $request_body ) = @_;
     $self->connector->perform_request(
-      pack( 'c a*', $request_code, $request_body )
+      pack( 'c a*', $request_code, $request_body // '' )
     );
 }
 

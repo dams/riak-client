@@ -63,25 +63,34 @@ sub BUILD {
 }
 
 # error
-const my $ERROR_RESPONSE_CODE       => 0;
+const my $ERROR_RESPONSE_CODE            => 0;
 # ping
-const my $PING_REQUEST_CODE         => 1;
-const my $PING_RESPONSE_CODE        => 2;
+const my $PING_REQUEST_CODE              => 1;
+const my $PING_RESPONSE_CODE             => 2;
 # get, get_raw
-const my $GET_REQUEST_CODE          => 9;
-const my $GET_RESPONSE_CODE         => 10;
+const my $GET_REQUEST_CODE               => 9;
+const my $GET_RESPONSE_CODE              => 10;
 # put, put_raw
-const my $PUT_REQUEST_CODE          => 11;
-const my $PUT_RESPONSE_CODE         => 12;
+const my $PUT_REQUEST_CODE               => 11;
+const my $PUT_RESPONSE_CODE              => 12;
+# get_buckets
+const my $GET_BUCKETS_REQUEST_CODE       => 15;
+const my $GET_BUCKETS_RESPONSE_CODE      => 16;
 # get_keys
-const my $GET_KEYS_REQUEST_CODE     => 17;
-const my $GET_KEYS_RESPONSE_CODE    => 18;
-# del, del
-const my $DEL_REQUEST_CODE          => 13;
-const my $DEL_RESPONSE_CODE         => 14;
+const my $GET_KEYS_REQUEST_CODE          => 17;
+const my $GET_KEYS_RESPONSE_CODE         => 18;
+# del
+const my $DEL_REQUEST_CODE               => 13;
+const my $DEL_RESPONSE_CODE              => 14;
+# get_bucket_props
+const my $GET_BUCKET_PROPS_REQUEST_CODE  => 19;
+const my $GET_BUCKET_PROPS_RESPONSE_CODE => 20;
+# set_bucket_props
+const my $SET_BUCKET_PROPS_REQUEST_CODE  => 21;
+const my $SET_BUCKET_PROPS_RESPONSE_CODE => 22;
 # quesry_index
-const my $QUERY_INDEX_REQUEST_CODE  => 25;
-const my $QUERY_INDEX_RESPONSE_CODE => 26;
+const my $QUERY_INDEX_REQUEST_CODE       => 25;
+const my $QUERY_INDEX_RESPONSE_CODE      => 26;
 
 sub ping {
     $_[0]->_parse_response(
@@ -174,7 +183,6 @@ sub _fetch {
         operation_name => 'get',
         body      => $body,
         decode    => $decode,
-
         handle_response => \&_handle_get_response,
     );
 }
@@ -194,7 +202,6 @@ sub _handle_get_response {
     ref($content) eq 'ARRAY'
       or return undef;
 
-
     # TODO: handle metadata
     my $value        = $content->[0]->value;
     my $content_type = $content->[0]->content_type;
@@ -205,10 +212,7 @@ sub _handle_get_response {
 
     # simply return the value
     return $value;
-
 }
-
-
 
 sub put_raw {
     state $check = compile(Any, Str, Str, Any, Optional[Str], Optional[HashRef[Str]]);
@@ -326,9 +330,74 @@ sub _handle_query_index_response {
     } else {
         return \@keys;
     }
-
 }
 
+sub get_buckets {
+    state $check = compile(Any, Optional[CodeRef]);
+    my ( $self, $callback ) = $check->(@_);
+
+    $self->_parse_response(
+        request_code    => $GET_BUCKETS_REQUEST_CODE,
+        expected_code   => $GET_BUCKETS_RESPONSE_CODE,
+        callback        => $callback,
+        handle_response => \&_handle_get_buckets_response,
+    );
+}
+
+sub _handle_get_buckets_response {
+    my ( $self, $encoded_message, $bucket, $key, $callback ) = @_;
+
+    defined $encoded_message
+      or $self->_die_generic_error( "Undefined Message", 'get_buckets' );
+
+    my $obj = RpbListBucketsResp->decode( $encoded_message );
+    my @buckets = @{$obj->buckets // []};
+    if ($callback) {
+        $callback->($_) foreach @buckets;
+        return;
+    } else {
+        return \@buckets;
+    }
+}
+
+sub get_bucket_props {
+    state $check = compile(Any, Str);
+    my ( $self, $bucket ) = $check->(@_);
+
+    my $body = RpbGetBucketReq->encode( { bucket => $bucket } );
+    $self->_parse_response(
+        request_code    => $GET_BUCKET_PROPS_REQUEST_CODE,
+        expected_code   => $GET_BUCKET_PROPS_RESPONSE_CODE,
+        bucket          => $bucket,
+        body            => $body,
+        handle_response => \&_handle_get_bucket_props_response,
+    );
+}
+
+sub _handle_get_bucket_props_response {
+    my ( $self, $encoded_message, $bucket ) = @_;
+
+    defined $encoded_message
+      or $self->_die_generic_error( "Undefined Message", 'get_bucket_props', $bucket );
+
+    my $obj = RpbListBucketsResp->decode( $encoded_message );
+    my $props = RpbBucketProps->decode($obj->buckets->[0]);
+    return { %$props }; # unblessing variable
+}
+
+sub set_bucket_props {
+    state $check = compile(Any, Str, Dict[ n_val => Optional[Int], allow_mult => Optional[Bool] ]);
+    my ( $self, $bucket, $props ) = $check->(@_);
+    $props->{n_val} && $props->{n_val} < 0 and croak 'n_val should be possitive integer';
+
+    my $body = RpbSetBucketReq->encode({ bucket => $bucket, props => $props });
+    $self->_parse_response(
+        request_code   => $SET_BUCKET_PROPS_REQUEST_CODE,
+        expected_code  => $SET_BUCKET_PROPS_RESPONSE_CODE,
+        bucket         => $bucket,
+        body           => $body,
+    );
+}
 
 sub _parse_response {
     my ( $self, %args ) = @_;
@@ -410,9 +479,7 @@ sub _parse_response {
 
         ref $@ eq '__RELOOP__'
           or die $@;
-
     }
-
 }
 
 
