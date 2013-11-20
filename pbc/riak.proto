@@ -76,6 +76,9 @@ message RpbListKeysResp {
     repeated bytes keys = 1;
     optional bool done = 2;
 }
+message RpbListBucketsResp {
+        repeated bytes buckets = 1;
+}
 message RpbIndexReq {
     enum IndexQueryType {
         eq = 0;

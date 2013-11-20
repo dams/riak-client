@@ -92,22 +92,24 @@ const my $GET      => 'get';
 const my $PUT      => 'put';
 const my $DEL      => 'del';
 const my $GET_KEYS => 'get_keys';
+const my $GET_BUCKETS => 'get_buckets';
 const my $QUERY_INDEX => 'query_index';
 
-const my $ERROR_RESPONSE_CODE    => 0;
-const my $GET_RESPONSE_CODE      => 10;
-const my $GET_KEYS_RESPONSE_CODE => 18;
+const my $ERROR_RESPONSE_CODE       => 0;
+const my $GET_RESPONSE_CODE         => 10;
+const my $GET_BUCKETS_RESPONSE_CODE => 16;
+const my $GET_KEYS_RESPONSE_CODE    => 18;
 const my $QUERY_INDEX_RESPONSE_CODE => 26;
 
 const my $CODES => {
-        $PING     => { request_code => 1,  response_code => 2 },
-        $GET      => { request_code => 9,  response_code => 10 },
-        $PUT      => { request_code => 11, response_code => 12 },
-        $DEL      => { request_code => 13, response_code => 14 },
-        $GET_KEYS => { request_code => 17, response_code => 18 },
-        $QUERY_INDEX => { request_code => 25, response_code => 26 },
-    };
-
+    $PING        => { request_code => 1,  response_code => 2 },
+    $GET         => { request_code => 9,  response_code => 10 },
+    $PUT         => { request_code => 11, response_code => 12 },
+    $DEL         => { request_code => 13, response_code => 14 },
+    $GET_BUCKETS => { request_code => 15, response_code => 16 },
+    $GET_KEYS    => { request_code => 17, response_code => 18 },
+    $QUERY_INDEX => { request_code => 25, response_code => 26 },
+};
 
 sub ping {
     $_[0]->_parse_response(
@@ -130,6 +132,16 @@ sub get_keys {
         bucket    => $bucket,
         operation => $GET_KEYS,
         body      => $body,
+        callback => $callback,
+    );
+}
+
+sub get_buckets {
+    state $check = compile(Any, Optional[CodeRef]);
+    my ( $self, $callback ) = $check->(@_);
+
+    $self->_parse_response(
+        operation => $GET_BUCKETS,
         callback => $callback,
     );
 }
@@ -351,6 +363,18 @@ sub _parse_response {
                 return;
             } else {
                 return \@keys;
+            }
+            next;
+        }
+
+        if ($response_code == $GET_BUCKETS_RESPONSE_CODE) {
+            my $obj = RpbListBucketsResp->decode( $response_body );
+            my @buckets = @{$obj->buckets // []};
+            if ($callback) {
+                $callback->($_) foreach @buckets;
+                return;
+            } else {
+                return \@buckets;
             }
             next;
         }
