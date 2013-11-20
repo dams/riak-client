@@ -57,8 +57,6 @@ sub BUILD {
 }
 
 const my $PING     => 'ping';
-const my $PUT      => 'put';
-const my $DEL      => 'del';
 const my $GET_KEYS => 'get_keys';
 const my $QUERY_INDEX => 'query_index';
 
@@ -68,6 +66,14 @@ const my $ERROR_RESPONSE_CODE    => 0;
 const my $GET_REQUEST_CODE       => 9;
 const my $GET_RESPONSE_CODE      => 10;
 
+# put, put_raw
+const my $PUT_REQUEST_CODE      => 11;
+const my $PUT_RESPONSE_CODE     => 12;
+
+# del, del
+const my $DEL_REQUEST_CODE      => 13;
+const my $DEL_RESPONSE_CODE     => 14;
+
 # get_keys
 const my $GET_KEYS_RESPONSE_CODE => 18;
 
@@ -75,8 +81,6 @@ const my $QUERY_INDEX_RESPONSE_CODE => 26;
 
 const my $CODES => {
         $PING     => { request_code => 1,  response_code => 2 },
-        $PUT      => { request_code => 11, response_code => 12 },
-        $DEL      => { request_code => 13, response_code => 14 },
         $GET_KEYS => { request_code => 17, response_code => 18 },
         $QUERY_INDEX => { request_code => 25, response_code => 26 },
     };
@@ -217,11 +221,13 @@ sub _store {
         }
     );
 
-    $self->_parse_response(
-        key       => $key,
-        bucket    => $bucket,
-        operation => $PUT,
-        body      => $body,
+    $self->_parse_response2(
+        request_code   => $PUT_REQUEST_CODE,
+        expected_code  => $PUT_RESPONSE_CODE,
+        key            => $key,
+        bucket         => $bucket,
+        operation_name => 'put',
+        body           => $body,
     );
 }
 
@@ -236,11 +242,13 @@ sub del {
         }
     );
 
-    $self->_parse_response(
-        key       => $key,
-        bucket    => $bucket,
-        operation => $DEL,
-        body      => $body,
+    $self->_parse_response2(
+        request_code   => $DEL_REQUEST_CODE,
+        expected_code  => $DEL_RESPONSE_CODE,
+        key            => $key,
+        bucket         => $bucket,
+        operation_name => 'del',
+        body           => $body,
     );
 }
 
@@ -442,7 +450,9 @@ sub _parse_response2 {
               $operation_name, $bucket, $key
           );
     
-
+        # if we don't need to handle the response, return success
+        $handle_response
+          or return 1;
 
         # handle the response.
         my $ret;
@@ -490,8 +500,6 @@ sub _parse_response2 {
             next;
         }
 
-        # in case of no return value, signify success
-        return 1;
     }
 
 }
