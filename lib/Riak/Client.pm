@@ -361,10 +361,9 @@ sub _parse_response {
             if ($callback) {
                 $callback->($_) foreach @keys;
                 return;
-            } else {
-                return \@keys;
             }
-            next;
+
+            return \@keys;
         }
 
         if ($response_code == $GET_BUCKETS_RESPONSE_CODE) {
@@ -373,10 +372,9 @@ sub _parse_response {
             if ($callback) {
                 $callback->($_) foreach @buckets;
                 return;
-            } else {
-                return \@buckets;
             }
-            next;
+
+            return \@buckets;
         }
 
         # in case of no return value, signify success
