@@ -94,11 +94,14 @@ const my $DEL      => 'del';
 const my $GET_KEYS => 'get_keys';
 const my $GET_BUCKETS => 'get_buckets';
 const my $QUERY_INDEX => 'query_index';
+const my $GET_BUCKET_PROPS => 'get_bucket_props';
+const my $SET_BUCKET_PROPS => 'set_bucket_props',
 
 const my $ERROR_RESPONSE_CODE       => 0;
 const my $GET_RESPONSE_CODE         => 10;
 const my $GET_BUCKETS_RESPONSE_CODE => 16;
 const my $GET_KEYS_RESPONSE_CODE    => 18;
+const my $GET_BUCKET_PROPS_RESPONSE_CODE => 20;
 const my $QUERY_INDEX_RESPONSE_CODE => 26;
 
 const my $CODES => {
@@ -108,6 +111,8 @@ const my $CODES => {
     $DEL         => { request_code => 13, response_code => 14 },
     $GET_BUCKETS => { request_code => 15, response_code => 16 },
     $GET_KEYS    => { request_code => 17, response_code => 18 },
+    $GET_BUCKET_PROPS => { request_code => 19, response_code => 20 },
+    $SET_BUCKET_PROPS => { request_code => 21, response_code => 22 },
     $QUERY_INDEX => { request_code => 25, response_code => 26 },
 };
 
@@ -142,7 +147,7 @@ sub get_buckets {
 
     $self->_parse_response(
         operation => $GET_BUCKETS,
-        callback => $callback,
+        callback  => $callback,
     );
 }
 
@@ -250,32 +255,72 @@ sub del {
 }
 
 sub query_index {
-     state $check = compile(Any, Str, Str, Str|ArrayRef);
-     my ( $self, $bucket, $index, $value_to_match ) = $check->(@_);
+    state $check = compile(Any, Str, Str, Str|ArrayRef);
+    my ( $self, $bucket, $index, $value_to_match ) = $check->(@_);
 
-     my $query_type = 0; # eq
-     ref $value_to_match
-       and $query_type = 1; # range
-     my $body = RpbIndexReq->encode(
-         {   index    => $index,
-             bucket   => $bucket,
-             qtype    => $query_type,
-             $query_type ?
-             ( range_min => $value_to_match->[0],
-               range_max => $value_to_match->[1] )
-             : (key => $value_to_match ),
-         }
-     );
+    my $query_type = 0; # eq
+    ref $value_to_match
+      and $query_type = 1; # range
+    my $body = RpbIndexReq->encode(
+        {   index    => $index,
+            bucket   => $bucket,
+            qtype    => $query_type,
+            $query_type ?
+            ( range_min => $value_to_match->[0],
+              range_max => $value_to_match->[1] )
+            : (key => $value_to_match ),
+        }
+    );
 
-     $self->_parse_response(
-         $query_type ?
-           (key => '2i query on ' . $value_to_match->[0] . '...' . $value_to_match->[1])
-         : (key => $value_to_match ),
-         bucket    => $bucket,
-         operation => $QUERY_INDEX,
-         body      => $body,
-     );
- }
+    $self->_parse_response(
+        $query_type ?
+          (key => '2i query on ' . $value_to_match->[0] . '...' . $value_to_match->[1])
+        : (key => $value_to_match ),
+        bucket    => $bucket,
+        operation => $QUERY_INDEX,
+        body      => $body,
+    );
+}
+
+sub get_bucket_props {
+    state $check = compile(Any, Str);
+    my ( $self, $bucket ) = $check->(@_);
+
+    my $body = RpbGetBucketReq->encode( { bucket => $bucket } );
+    $self->_parse_response(
+        operation => $GET_BUCKET_PROPS,
+        bucket    => $bucket,
+        body      => $body,
+    );
+}
+
+sub set_bucket_props {
+    state $check = compile(Any, Str, HashRef);
+    my ( $self, $bucket, $props ) = $check->(@_);
+
+    # need aditional checks to verify RpbBucketProps format
+    # message RpbBucketProps {
+    #     optional uint32 n_val = 1;
+    #     optional bool allow_mult = 2;
+    # }
+    state $check_props = compile(Optional[Int], Optional[Bool]);
+    my ( $n_val, $allow_mult ) = $check_props->($props->{n_val}, $props->{allow_mult});
+    $n_val < 0 and croak 'allow_mult should be possitive integer';
+
+    my $body = RpbSetBucketReq->encode({
+        bucket => $bucket,
+        props => {
+            n_val      => $n_val,
+            allow_mult => $allow_mult,
+        },
+    });
+
+    $self->_parse_response(
+        operation => $SET_BUCKET_PROPS,
+        bucket    => $bucket,
+        body      => $body,
+    );
+}
 
 sub _parse_response {
     my ( $self, %args ) = @_;
@@ -375,6 +420,13 @@ sub _parse_response {
             }
 
             return \@buckets;
+        }
+ 
+        if ($response_code == $GET_BUCKET_PROPS_RESPONSE_CODE) {
+            my $obj = RpbListBucketsResp->decode( $response_body );
+            my @buckets = @{$obj->buckets // []};
+            @buckets and return RpbBucketProps->decode($buckets[0]);
+            return;
         }
 
         # in case of no return value, signify success

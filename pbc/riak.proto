@@ -101,3 +101,17 @@ message RpbIndexResp {
     optional bytes continuation = 3;
     optional bool done = 4;
 }
+message RpbGetBucketReq {
+    required bytes bucket = 1;
+}
+message RpbGetBucketResp {
+    required RpbBucketProps props = 1;
+}
+message RpbSetBucketReq {
+    required bytes bucket = 1;
+    required RpbBucketProps props = 2;
+}
+message RpbBucketProps {
+    optional uint32 n_val = 1;
+    optional bool allow_mult = 2;
+}
