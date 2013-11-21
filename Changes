@@ -1,9 +1,14 @@
 {{$NEXT}}
 
+0.11      2013-11-21 14:16:06 Europe/Amsterdam
+   * fix networking code issues (handle EINTR and fix bug) (ivan)
+   * implements get_buckets + (get|set)_bucket_props (ivan)
+   * other bugfixes
+
 0.10      2013-11-20 17:29:38 Europe/Amsterdam
-   * almost rewrote it from scratch
-   * a lot of refactoring
-   * removed the autodie option
-   * added pbc protocol
-   * better dist.ini
+   * almost rewrote it from scratch (dams)
+   * a lot of refactoring (dams)
+   * removed the autodie option (dams)
+   * added pbc protocol (dams)
+   * better dist.ini (dams)
    * Initial version, forked from Riak::Light (dams)
