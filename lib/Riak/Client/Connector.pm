@@ -42,12 +42,14 @@ sub _send_all {
 
     while ($length > 0) {
         $sent = $self->socket->syswrite( $bytes, $length, $offset );
-        if (not defined $sent) {
-            next if $! == EINTR;
-            return;
-        } elsif ($sent <= 0) {
+        if (! defined $sent) {
+            $! == EINTR
+              and next;
             return;
         }
+
+        $sent > 0
+          or return;
 
         $offset += $sent;
         $length -= $sent;
@@ -65,12 +67,14 @@ sub _read_all {
 
     while ($length > 0) {
         $read = $self->socket->sysread( $buffer, $length, $offset );
-        if (not defined $read) {
-            next if $! == EINTR;
-            return;
-        } elsif ($read <= 0) {
+        if (! defined $read) {
+            $! == EINTR
+              and next;
             return;
         }
+
+        $read > 0
+          or return;
 
         $offset += $read;
         $length -= $read;
