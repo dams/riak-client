@@ -57,7 +57,7 @@ subtest "simple get/set/delete test" => sub {
 };
 
 subtest "get keys" => sub {
-    plan tests => 4;
+    plan tests => 5;
 
     my $bucket = "foo_" . int( rand(1024) ) . "_" . int( rand(1024) );
 
@@ -82,9 +82,11 @@ subtest "get keys" => sub {
 
     @keys = ();
     $client->get_keys( $bucket => sub { push @keys, $_[0] } );
+    my @keys_without_callback = @{ $client->get_keys( $bucket ) // [] };
 
     @keys = sort @keys;
     is( scalar @keys, 3 );
+    is( scalar @keys_without_callback, 3 );
     is( $keys[0],     'bam' );
     is( $keys[1],     'bar' );
     is( $keys[2],     'baz' );
