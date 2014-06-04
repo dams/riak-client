@@ -4,13 +4,11 @@ package Riak::Client;
 
 use 5.010;
 use Riak::Client::PBC;
-use Riak::Client::Driver;
+use Riak::Client::Connector;
 use Type::Params qw(compile);
 use Types::Standard -types;
 use English qw(-no_match_vars );
 use Scalar::Util qw(blessed);
-use IO::Socket;
-use IO::Socket::Timeout;
 use Const::Fast;
 use JSON;
 use Carp;
@@ -88,15 +86,15 @@ DW value setting for this client. Int, Default 1.
 
 =attr connection_timeout
 
-Timeout for socket connection operation, in seconds. Float, Defaults to 5
+Timeout for connection operation, in seconds. Set to 0 for no timeout. Float, Defaults to 5
 
 =attr read_timeout
 
-Timeout for socket read operation, in seconds. Float, Defaults to 5
+Timeout for read operation, in seconds. Set to 0 for no timeout. Float, Defaults to 5
 
 =attr write_timeout
 
-Timeout for socket write operation, in seconds. Float, Defaults to 5
+Timeout for write operation, in seconds. Set to 0 for no timeout. Float, Defaults to 5
 
 =cut
 
@@ -109,44 +107,29 @@ has connection_timeout => ( is => 'ro',                 isa => Num,  default  =>
 has read_timeout       => ( is => 'ro', predicate => 1, isa => Num,  default  => sub {5} );
 has write_timeout      => ( is => 'ro', predicate => 1, isa => Num,  default  => sub {5} );
 
-has driver => ( is => 'lazy' );
+=attr no_auto_connect
+
+If set to true, then the module won't automatically connect upon instanciation.
+Instead, you'll have to call C<connect()> yoruself. Boolean, Defaults to 0
+
+=cut
+
+has no_auto_connect => ( is => 'ro', isa => Bool,  default  => sub {0} );
+
+has _connector => ( is => 'ro', lazy => 1, builder => 1);
+
+sub _build__connector {
+    my ($self) = @_;
+    Riak::Client::Connector->new(
+        map { $_ => $self->$_ }
+        qw( host port connection_timeout read_timeout write_timeout )
+    );
+}
 
 has _request_accumulator => (is => 'rw', init_arg => undef);
 
 sub _reloop {
     die bless \do { my $e }, '__RELOOP__';
-}
-
-sub _build_driver {
-    Riak::Client::Driver->new( socket => $_[0]->_build_socket() );
-}
-
-sub _build_socket {
-    my ($self) = @_;
-
-    my $host = $self->host;
-    my $port = $self->port;
-
-    my $socket = IO::Socket::INET->new(
-        PeerHost => $host,
-        PeerPort => $port,
-        Timeout  => $self->connection_timeout,
-    );
-
-    croak "Error ($!), can't connect to $host:$port"
-      unless defined $socket;
-
-    # enable read and write timeouts on the socket
-    IO::Socket::Timeout->enable_timeouts_on($socket);
-    # setup the timeouts
-    $socket->read_timeout($self->read_timeout);
-    # $socket->write_timeout($self->write_timeout);
-
-    return $socket;
-}
-
-sub BUILD {
-    $_[0]->driver;
 }
 
 # error
@@ -651,26 +634,33 @@ sub _parse_response {
 
     my $handle_response = $args{handle_response};
     
-    $self->driver->perform_request(
-        $request_code, $request_body
-      )
-      or return $self->_die_generic_error(
+    $self->_connector->perform_request(
+      pack( 'c a*', $request_code, $request_body // '' )
+    ) or $self->_die_generic_error(
         $ERRNO, $operation_name, $bucket,
         $key
-      );
+    );
 
 #    my $done = 0;
 #$expected_code != $GET_KEYS_RESPONSE_CODE;
 
     while (1) {
+        my $response;
         # get and check response
-        my $response = $self->driver->read_response();
+        if (my $raw_response = $self->_connector->read_response()) {
+            my ( $code, $body ) = unpack( 'c a*', $raw_response );
+            $response = { code => $code, body => $body, error => undef };
+        } else {
+            $response = { code => -1,
+                          body => undef,
+                          error => $ERRNO || "Socket Closed" };
+        }
 
         my ($response_code, $response_body, $response_error) = @{$response}{qw(code body error)};
 
         # in case of internal error message
         defined $response_error
-          and return $self->_die_generic_error(
+          and $self->_die_generic_error(
               $response_error, $operation_name, $bucket,
               $key
           );
@@ -682,15 +672,15 @@ sub _parse_response {
             my $errmsg  = $decoded_message->errmsg;
             my $errcode = $decoded_message->errcode;
 
-            return $self->_die_generic_error( "Riak Error (code: $errcode) '$errmsg'",
-                                                  $operation_name, $bucket, $key
-                                                );
+            $self->_die_generic_error( "Riak Error (code: $errcode) '$errmsg'",
+                                       $operation_name, $bucket, $key
+                                     );
         }
 
 
         # check if we have what we want
         $response_code != $expected_code
-          and return $self->_die_generic_error(
+          and $self->_die_generic_error(
               "Unexpected Response Code in (got: $response_code, expected: $expected_code)",
               $operation_name, $bucket, $key
           );
