@@ -17,7 +17,7 @@ subtest "should not die if can connect" => sub {
                 Timeout   => 1,
                 Reuse     => 1,
                 LocalPort => $port
-            ) or die "ops $!";
+            ) or die "oops $!";
 
             while (1) {
                 $socket->accept()->close();

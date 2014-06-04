@@ -17,7 +17,6 @@ subtest "query 2i" => sub {
 
     my $client = Riak::Client->new(
         host             => $host, port => $port,
-        timeout_provider => undef
     );
 
     ok( $client->ping(),     "should can ping" );

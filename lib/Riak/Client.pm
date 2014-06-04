@@ -10,6 +10,7 @@ use Types::Standard -types;
 use English qw(-no_match_vars );
 use Scalar::Util qw(blessed);
 use IO::Socket;
+use IO::Socket::Timeout;
 use Const::Fast;
 use JSON;
 use Carp;
@@ -18,12 +19,95 @@ use Moo;
 
 # ABSTRACT: Fast and lightweight Perl client for Riak
 
-has port    => ( is => 'ro', isa => Int,  required => 1 );
+=head1 SYNOPSIS
+
+  use Riak::Client;
+
+  # create a new instance - using pbc only
+  my $client = Riak::Client->new(
+    host => '127.0.0.1',
+    port => 8087
+  );
+
+  $client->is_alive() or die "oops, riak is not alive";
+
+  # store hashref into bucket 'foo', key 'bar'
+  # will serializer as 'application/json'
+  $client->put( foo => bar => { baz => 1024 });
+
+  # store text into bucket 'foo', key 'bar' 
+  $client->put( foo => baz => "sometext", 'text/plain');
+  $client->put_raw( foo => baz => "sometext");  # does not encode !
+
+  # fetch hashref from bucket 'foo', key 'bar'
+  my $hash = $client->get( foo => 'bar');
+  my $text = $client->get_raw( foo => 'baz');   # does not decode !
+
+  # delete hashref from bucket 'foo', key 'bar'
+  $client->del(foo => 'bar');
+
+  # check if exists (like get but using less bytes in the response)
+  $client->exists(foo => 'baz') or warn "oops, foo/bar does not exist";
+
+  # list keys in stream (callback only)
+  $client->get_keys(foo => sub{
+     my $key = $_[0];
+
+     # you should use another client inside this callback!
+     $another_client->del(foo => $key);
+  });
+  
+=head1 DESCRIPTION
+
+Riak::Client is a very light (and fast) Perl client for Riak using PBC
+interface. Support operations like ping, get, exists, put, del, and secondary
+indexes (so-called 2i) setting and querying.
+
+It started as a for of Riak::Light to fix some bugs, but actually ended up in a
+complete rewrite with more features, but the same performance
+
+=attr host
+
+Riak IP or hostname. Str, Required.
+
+=attr port
+
+Port of the PBC interface. Int, Required.
+
+=attr r
+
+R value setting for this client. Int, Default 2.
+
+=attr w
+
+W value setting for this client. Int, Default 2.
+
+=attr dw
+
+DW value setting for this client. Int, Default 1.
+
+=attr connection_timeout
+
+Timeout for socket connection operation, in seconds. Float, Defaults to 5
+
+=attr read_timeout
+
+Timeout for socket read operation, in seconds. Float, Defaults to 5
+
+=attr write_timeout
+
+Timeout for socket write operation, in seconds. Float, Defaults to 5
+
+=cut
+
 has host    => ( is => 'ro', isa => Str,  required => 1 );
+has port    => ( is => 'ro', isa => Int,  required => 1 );
 has r       => ( is => 'ro', isa => Int,  default  => sub {2} );
 has w       => ( is => 'ro', isa => Int,  default  => sub {2} );
-has dw      => ( is => 'ro', isa => Int,  default  => sub {2} );
-has connection_timeout => ( is => 'ro', isa => Num,  default  => sub {0.5} );
+has dw      => ( is => 'ro', isa => Int,  default  => sub {1} );
+has connection_timeout => ( is => 'ro',                 isa => Num,  default  => sub {5} );
+has read_timeout       => ( is => 'ro', predicate => 1, isa => Num,  default  => sub {5} );
+has write_timeout      => ( is => 'ro', predicate => 1, isa => Num,  default  => sub {5} );
 
 has driver => ( is => 'lazy' );
 
@@ -52,8 +136,11 @@ sub _build_socket {
     croak "Error ($!), can't connect to $host:$port"
       unless defined $socket;
 
-
-    # TODO: handle timeout properly
+    # enable read and write timeouts on the socket
+    IO::Socket::Timeout->enable_timeouts_on($socket);
+    # setup the timeouts
+    $socket->read_timeout($self->read_timeout);
+    # $socket->write_timeout($self->write_timeout);
 
     return $socket;
 }
@@ -92,6 +179,15 @@ const my $SET_BUCKET_PROPS_RESPONSE_CODE => 22;
 const my $QUERY_INDEX_REQUEST_CODE       => 25;
 const my $QUERY_INDEX_RESPONSE_CODE      => 26;
 
+=method ping
+
+  use Try::Tiny;
+  try { $client->ping() } catch { "oops... something is wrong: $_" };
+
+Perform a ping operation. Will die in case of error. See C<is_alive()>
+
+=cut
+
 sub ping {
     $_[0]->_parse_response(
         request_code  => $PING_REQUEST_CODE,
@@ -101,9 +197,162 @@ sub ping {
     );
 }
 
+=method is_alive
+
+  $client->is_alive() or warn "oops... something is wrong: $@";
+
+Perform a ping operation. Will return false in case of error (which will be stored in $@).
+
+=cut
+
 sub is_alive {
     eval { $_[0]->ping };
 }
+
+=method get
+
+  my $value_or_reference = $client->get(bucket => 'key');
+
+Perform a fetch operation. Expects bucket and key names. Decode the json into a
+Perl structure. if the content_type is 'application/json'. If you need the raw
+data you can use L<get_raw>.
+
+=cut
+
+sub get {
+    state $check = compile(Any, Str, Str);
+    my ( $self, $bucket, $key ) = $check->(@_);
+    $self->_fetch( $bucket, $key, 1 );
+}
+
+=method get_raw
+
+  my $scalar_value = $client->get_raw(bucket => 'key');
+
+Perform a fetch operation. Expects bucket and key names. Returns the raw data.
+If you need decode the json, you should use C<get()> instead.
+
+=cut
+
+sub get_raw {
+    state $check = compile(Any, Str, Str);
+    my ( $self, $bucket, $key ) = $check->(@_);
+    $self->_fetch( $bucket, $key, 0 );
+}
+
+=method put
+
+  $client->put('bucket', 'key', { some_values => [1,2,3] });
+  $client->put('bucket', 'key', { some_values => [1,2,3] }, 'application/json);
+  $client->put('bucket', 'key', 'text', 'plain/text');
+
+  # you can set secondary indexes (2i)
+  $client->put( 'bucket', 'key', 'text', 'plain/text',
+                { field1_bin => 'abc', field2_int => 42 }
+              );
+  $client->put( 'bucket', 'key', { some_values => [1,2,3] }, undef,
+                { field1_bin => 'abc', field2_int => 42 }
+              );
+
+Perform a store operation. Expects bucket and key names, the value, the content
+type (optional, default is 'application/json'), and the indexes to set for this
+value (optional, default is none).
+
+Will encode the structure in json string if necessary. If you need only store
+the raw data you can use L<put_raw> instead.
+
+B<IMPORTANT>: all the index field names should end by either C<_int> or
+C<_bin>, depending if the index type is integer or binary.
+
+To query secondary indexes, see L<query_index>.
+
+=cut
+
+sub put {
+    state $check = compile(Any, Str, Str, Any, Optional[Str], Optional[HashRef[Str]]);
+    my ( $self, $bucket, $key, $value, $content_type, $indexes ) = $check->(@_);
+
+    ($content_type ||= 'application/json')
+      eq 'application/json'
+        and $value = encode_json($value);
+
+    $self->_store( $bucket, $key, $value, $content_type, $indexes);
+}
+
+
+=method put_raw
+
+  $client->put_raw('bucket', 'key', encode_json({ some_values => [1,2,3] }), 'application/json');
+  $client->put_raw('bucket', 'key', 'text');
+  $client->put_raw('bucket', 'key', 'text', undef, {field_bin => 'foo'});
+
+Perform a store operation. Expects bucket and key names, the value, the content
+type (optional, default is 'plain/text'), and the indexes to set for this value
+(optional, default is none).
+
+Will encode the raw data. If you need encode the structure you can use L<put>
+instead.
+
+B<IMPORTANT>: all the index field names should end by either C<_int> or
+C<_bin>, depending if the index type is integer or binary.
+
+To query secondary indexes, see L<query_index>.
+
+=cut
+
+sub put_raw {
+    state $check = compile(Any, Str, Str, Any, Optional[Str], Optional[HashRef[Str]]);
+    my ( $self, $bucket, $key, $value, $content_type, $indexes ) = $check->(@_);
+    $content_type ||= 'plain/text';
+    $self->_store( $bucket, $key, $value, $content_type, $indexes);
+}
+
+=method del
+
+  $client->del(bucket => key);
+
+Perform a delete operation. Expects bucket and key names.
+
+=cut
+
+sub del {
+    state $check = compile(Any, Str, Str);
+    my ( $self, $bucket, $key ) = $check->(@_);
+
+    my $body = RpbDelReq->encode(
+        {   key    => $key,
+            bucket => $bucket,
+            rw     => $self->dw
+        }
+    );
+
+    $self->_parse_response(
+        request_code   => $DEL_REQUEST_CODE,
+        expected_code  => $DEL_RESPONSE_CODE,
+        operation_name => 'del',
+        key            => $key,
+        bucket         => $bucket,
+        body           => $body,
+    );
+}
+
+=method get_keys
+
+  $client->get_keys(foo => sub{
+     my $key = $_; # also in $_[0]
+
+     # you should use another client inside this callback!
+     $another_client->del(foo => $key);
+  });
+
+Perform a list keys operation. Receive a callback and will call it for each
+key.
+
+The callback is optional, in which case an ArrayRef of B<all> the keys are
+returned. But don't do that, and always provide a callback, to avoid your RAM
+usage to skyrocket...
+
+=cut
 
 sub get_keys {
     state $check = compile(Any, Str, Optional[CodeRef]);
@@ -115,9 +364,9 @@ sub get_keys {
     $self->_parse_response(
         request_code   => $GET_KEYS_REQUEST_CODE,
         expected_code  => $GET_KEYS_RESPONSE_CODE,
+        operation_name => 'get_keys',
         key            => "*",
         bucket         => $bucket,
-        operation_name => 'get_keys',
         body           => $body,
         callback       => $callback,
         handle_response => \&_handle_get_keys_response
@@ -146,17 +395,14 @@ sub _handle_get_keys_response {
     _reloop();
 }
 
-sub get_raw {
-    state $check = compile(Any, Str, Str);
-    my ( $self, $bucket, $key ) = $check->(@_);
-    $self->_fetch( $bucket, $key, 0 );
-}
+=method exists
 
-sub get {
-    state $check = compile(Any, Str, Str);
-    my ( $self, $bucket, $key ) = $check->(@_);
-    $self->_fetch( $bucket, $key, 1 );
-}
+  $client->exists(bucket => 'key') or warn "key not found";
+  
+Perform a fetch operation but with head => 0, and the if there is something
+stored in the bucket/key.
+
+=cut
 
 sub exists {
     state $check = compile(Any, Str, Str);
@@ -178,9 +424,9 @@ sub _fetch {
     $self->_parse_response(
         request_code  => $GET_REQUEST_CODE,
         expected_code => $GET_RESPONSE_CODE,
+        operation_name => 'get',
         key       => $key,
         bucket    => $bucket,
-        operation_name => 'get',
         body      => $body,
         decode    => $decode,
         handle_response => \&_handle_get_response,
@@ -214,24 +460,6 @@ sub _handle_get_response {
     return $value;
 }
 
-sub put_raw {
-    state $check = compile(Any, Str, Str, Any, Optional[Str], Optional[HashRef[Str]]);
-    my ( $self, $bucket, $key, $value, $content_type, $indexes ) = $check->(@_);
-    $content_type ||= 'plain/text';
-    $self->_store( $bucket, $key, $value, $content_type, $indexes);
-}
-
-sub put {
-    state $check = compile(Any, Str, Str, Any, Optional[Str], Optional[HashRef[Str]]);
-    my ( $self, $bucket, $key, $value, $content_type, $indexes ) = $check->(@_);
-
-    ($content_type ||= 'application/json')
-      eq 'application/json'
-        and $value = encode_json($value);
-
-    $self->_store( $bucket, $key, $value, $content_type, $indexes);
-}
-
 sub _store {
     my ( $self, $bucket, $key, $encoded_value, $content_type, $indexes ) = @_;
 
@@ -255,33 +483,40 @@ sub _store {
     $self->_parse_response(
         request_code   => $PUT_REQUEST_CODE,
         expected_code  => $PUT_RESPONSE_CODE,
-        key            => $key,
-        bucket         => $bucket,
         operation_name => 'put',
-        body           => $body,
-    );
-}
-
-sub del {
-    state $check = compile(Any, Str, Str);
-    my ( $self, $bucket, $key ) = $check->(@_);
-
-    my $body = RpbDelReq->encode(
-        {   key    => $key,
-            bucket => $bucket,
-            rw     => $self->dw
-        }
-    );
-
-    $self->_parse_response(
-        request_code   => $DEL_REQUEST_CODE,
-        expected_code  => $DEL_RESPONSE_CODE,
         key            => $key,
         bucket         => $bucket,
-        operation_name => 'del',
         body           => $body,
     );
 }
+
+=method query_index
+
+Perform a secondary index (2i) query. Expects a bucket name, the index field
+name, the index value you're searching on, and optionally a callback.
+
+If a callback has been provided, doesn't return anything, but execute the
+callback on each matching keys. callback will receive the key name as first
+argument. key name will also be in C<$_>. If no callback is provided, returns
+and ArrayRef of matching keys.
+
+The index value you're searching on can be of two types. If it's a Scalar, an
+B<exact match> query will be performed. if the value is an ArrayRef, then a
+B<range> query will be performed, the first element in the array will be the
+range_min, the second element the range_max. other elements will be ignored.
+
+Based on the example in C<put>, here is how to query it:
+
+  # exact match
+  my $matching_keys = $client->query_index( 'bucket',  'field2_int', 42 ),
+
+  # range match
+  my $matching_keys = $client->query_index( 'bucket',  'field2_int', [ 40, 50] ),
+
+  # range match with callback
+  $client->query_index( 'bucket',  'field2_int', [ 40, 50], sub { print "key : $_" } ),
+
+=cut
 
 sub query_index {
     state $check = compile(Any, Str, Str, Str|ArrayRef, Optional[CodeRef]);
@@ -305,11 +540,11 @@ sub query_index {
     $self->_parse_response(
         request_code   => $QUERY_INDEX_REQUEST_CODE,
         expected_code  => $QUERY_INDEX_RESPONSE_CODE,
+        operation_name => 'query_index',
         $query_type_is_eq ?
           (key => '2i query on ' . join('...', @$value_to_match) )
         : (key => $value_to_match ),
         bucket    => $bucket,
-        operation_name => 'query_index',
         body      => $body,
         handle_response => \&_handle_query_index_response,
     );
@@ -339,6 +574,7 @@ sub get_buckets {
     $self->_parse_response(
         request_code    => $GET_BUCKETS_REQUEST_CODE,
         expected_code   => $GET_BUCKETS_RESPONSE_CODE,
+        operation_name => 'get_buckets',
         callback        => $callback,
         handle_response => \&_handle_get_buckets_response,
     );
@@ -486,6 +722,11 @@ sub _parse_response {
 sub _die_generic_error {
     my ( $self, $error, $operation_name, $bucket, $key ) = @_;
 
+    { no strict 'refs';
+      ${$_} //= "<unknown $_>"
+        for qw(operation_name error bucket key);
+    }
+
     my $extra = '';
     defined $bucket && defined $key
       and $extra = "(bucket: $bucket, key: $key)";
@@ -494,215 +735,6 @@ sub _die_generic_error {
 }
 
 1;
-
-__END__
-
-=head1 SYNOPSIS
-
-  use Riak::Client;
-
-  # create a new instance - using pbc only
-  my $client = Riak::Client->new(
-    host => '127.0.0.1',
-    port => 8087
-  );
-
-  $client->is_alive() or die "ops, riak is not alive";
-
-  # store hashref into bucket 'foo', key 'bar'
-  # will serializer as 'application/json'
-  $client->put( foo => bar => { baz => 1024 });
-
-  # store text into bucket 'foo', key 'bar' 
-  $client->put( foo => baz => "sometext", 'text/plain');
-  $client->put_raw( foo => baz => "sometext");  # does not encode !
-
-  # fetch hashref from bucket 'foo', key 'bar'
-  my $hash = $client->get( foo => 'bar');
-  my $text = $client->get_raw( foo => 'baz');   # does not decode !
-
-  # delete hashref from bucket 'foo', key 'bar'
-  $client->del(foo => 'bar');
-
-  # check if exists (like get but using less bytes in the response)
-  $client->exists(foo => 'baz') or warn "ops, foo => bar does not exist";
-
-  # list keys in stream (callback only)
-  $client->get_keys(foo => sub{
-     my $key = $_[0];
-
-     # you should use another client inside this callback!
-     $another_client->del(foo => $key);
-  });
-  
-=head1 DESCRIPTION
-
-Riak::Client is a very light (and fast) Perl client for Riak using PBC
-interface. Support operations like ping, get, exists, put, del, and secondary
-indexes (so-called 2i) setting and querying.
-
-It started as a for of Riak::Light to fix some bugs, but actually ended up in a
-complete rewrite with more features, but the same performance
-
-=head2 ATTRIBUTES
-
-=head3 host
-
-Riak ip or hostname. There is no default.
-
-=head3 port
-
-Port of the PBC interface. There is no default.
-
-=head3 r
-
-R value setting for this client. Default 2.
-
-=head3 w
-
-W value setting for this client. Default 2.
-
-=head3 dw
-
-DW value setting for this client. Default 2.
-
-=head3 timeout
-
-Timeout for socket connection operation.
-
-=head3 driver
-
-This is a Riak::Client::Driver instance, to be able to connect and perform
-requests to Riak over PBC interface.
-
-=head2 METHODS
-
-
-=head3 is_alive
-
-  $client->is_alive() or warn "ops... something is wrong: $@";
-
-Perform a ping operation. Will return false in case of error (will store in $@).
-
-=head3 is_alive
-
-  try { $client->ping() } catch { "oops... something is wrong: $_" };
-
-Perform a ping operation. Will die in case of error.
-
-=head3 get
-
-  my $value_or_reference = $client->get(bucket => 'key');
-
-Perform a fetch operation. Expects bucket and key names. Decode the json into a
-Perl structure. if the content_type is 'application/json'. If you need the raw
-data you can use L<get_raw>.
-
-=head3 get_raw
-
-  my $scalar_value = $client->get_raw(bucket => 'key');
-
-Perform a fetch operation. Expects bucket and key names. Return the raw data.
-If you need decode the json, you should use L<get> instead.
-
-=head3 exists
-
-  $client->exists(bucket => 'key') or warn "key not found";
-  
-Perform a fetch operation but with head => 0, and the if there is something
-stored in the bucket/key.
-
-=head3 put
-
-  $client->put('bucket', 'key', { some_values => [1,2,3] });
-  $client->put('bucket', 'key', { some_values => [1,2,3] }, 'application/json);
-  $client->put('bucket', 'key', 'text', 'plain/text');
-
-  # you can set secondary indexes (2i)
-  $client->put( 'bucket', 'key', 'text', 'plain/text',
-                { field1_bin => 'abc', field2_int => 42 }
-              );
-  $client->put( 'bucket', 'key', { some_values => [1,2,3] }, undef,
-                { field1_bin => 'abc', field2_int => 42 }
-              );
-
-Perform a store operation. Expects bucket and key names, the value, the content
-type (optional, default is 'application/json'), and the indexes to set for this
-value (optional, default is none).
-
-Will encode the structure in json string if necessary. If you need only store
-the raw data you can use L<put_raw> instead.
-
-B<IMPORTANT>: all the index field names should end by either C<_int> or
-C<_bin>, depending if the index type is integer or binary.
-
-To query secondary indexes, see L<query_index>.
-
-=head3 put_raw
-
-  $client->put_raw('bucket', 'key', encode_json({ some_values => [1,2,3] }), 'application/json');
-  $client->put_raw('bucket', 'key', 'text');
-  $client->put_raw('bucket', 'key', 'text', undef, {field_bin => 'foo'});
-
-Perform a store operation. Expects bucket and key names, the value, the content
-type (optional, default is 'plain/text'), and the indexes to set for this value
-(optional, default is none).
-
-Will encode the raw data. If you need encode the structure you can use L<put>
-instead.
-
-B<IMPORTANT>: all the index field names should end by either C<_int> or
-C<_bin>, depending if the index type is integer or binary.
-
-To query secondary indexes, see L<query_index>.
-
-=head3 del
-
-  $client->del(bucket => key);
-
-Perform a delete operation. Expects bucket and key names.
-  
-=head3 get_keys
-
-  $client->get_keys(foo => sub{
-     my $key = $_; # also in $_[0]
-
-     # you should use another client inside this callback!
-     $another_client->del(foo => $key);
-  });
-
-Perform a list keys operation. Receive a callback and will call it for each
-key. You can't use this callback to perform other operations!
-
-The callback is optional, in which case an ArrayRef of all the keys are
-returned. But you should always provide a callback, to avoid your RAM usage to
-skyrocket...
-
-=head3 query_index
-
-Perform a secondary index query. Expects a bucket name, the index field name,
-the index value you're searching on, and optionally a callback.
-
-If a callback has been provided, doesn't return anything, but execute the
-callback on each matching keys. callback will receive the key name as first
-argument. key name will also be in $_. If no callback is provided, returns and
-ArrayRef of matching keys.
-
-The index value you're searching on can be of two types. If it's a scalar, an
-B<exact match> query will be performed. if the value is an ArrayRef, then a
-B<range> query will be performed, the first element in the array will be the
-range_min, the second element the range_max. other elements will be ignored.
-
-Based on the example in C<put>, here is how to query it:
-
-  # exact match
-  my $matching_keys = $client->query_index( 'bucket',  'field2_int', 42 ),
-
-  # range match
-  my $matching_keys = $client->query_index( 'bucket',  'field2_int', [ 40, 50] ),
-
-  # range match with callback
-  $client->query_index( 'bucket',  'field2_int', [ 40, 50], sub { print "key : $_" } ),
 
 =head1 SEE ALSO
 

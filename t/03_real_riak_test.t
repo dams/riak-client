@@ -18,7 +18,6 @@ subtest "simple get/set/delete test" => sub {
 
     my $client = Riak::Client->new(
         host             => $host, port => $port,
-        timeout_provider => undef
     );
 
     my $scalar = '3.14159';
@@ -65,7 +64,6 @@ subtest "get keys" => sub {
 
     my $client = Riak::Client->new(
         host             => $host, port => $port,
-        timeout_provider => undef
     );
 
     my @keys;
@@ -99,7 +97,6 @@ subtest "sequence of 1024 get/set" => sub {
 
     my $client = Riak::Client->new(
         host             => $host, port => $port,
-        timeout_provider => undef
     );
 
     my $hash = {
@@ -131,7 +128,6 @@ subtest "get buckets" => sub {
 
     my $client = Riak::Client->new(
         host             => $host, port => $port,
-        timeout_provider => undef
     );
 
     my @new_buckets = (
@@ -162,7 +158,6 @@ subtest "get/set buckets props" => sub {
 
     my $client = Riak::Client->new(
         host             => $host, port => $port,
-        timeout_provider => undef
     );
 
     my @buckets = (

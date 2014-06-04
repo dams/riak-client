@@ -39,9 +39,10 @@ sub _send_all {
     my $length = bytes::length($bytes);
     my $offset = 0;
     my $sent = 0;
+    my $socket = $self->socket;
 
     while ($length > 0) {
-        $sent = $self->socket->syswrite( $bytes, $length, $offset );
+        $sent = $socket->syswrite( $bytes, $length, $offset );
         if (! defined $sent) {
             $! == EINTR
               and next;
@@ -64,9 +65,10 @@ sub _read_all {
     my $buffer;
     my $offset = 0;
     my $read = 0;
+    my $socket = $self->socket;
 
     while ($length > 0) {
-        $read = $self->socket->sysread( $buffer, $length, $offset );
+        $read = $socket->sysread( $buffer, $length, $offset );
         if (! defined $read) {
             $! == EINTR
               and next;
