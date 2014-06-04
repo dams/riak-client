@@ -4,15 +4,18 @@ package Riak::Client;
 
 use 5.010;
 use Riak::Client::PBC;
-use Riak::Client::Connector;
 use Type::Params qw(compile);
 use Types::Standard -types;
 use English qw(-no_match_vars );
+use Errno qw(EINTR);
 use Scalar::Util qw(blessed);
 use Const::Fast;
 use JSON;
 use Carp;
 use Module::Runtime qw(use_module);
+require bytes;
+use IO::Socket;
+use IO::Socket::Timeout;
 use Moo;
 
 # ABSTRACT: Fast and lightweight Perl client for Riak
@@ -116,14 +119,41 @@ Instead, you'll have to call C<connect()> yoruself. Boolean, Defaults to 0
 
 has no_auto_connect => ( is => 'ro', isa => Bool,  default  => sub {0} );
 
-has _connector => ( is => 'ro', lazy => 1, builder => 1);
+has _socket => ( is => 'ro', lazy => 1, builder => 1 );
 
-sub _build__connector {
+sub _build__socket {
     my ($self) = @_;
-    Riak::Client::Connector->new(
-        map { $_ => $self->$_ }
-        qw( host port connection_timeout read_timeout write_timeout )
+
+    my $host = $self->host;
+    my $port = $self->port;
+
+    my $socket = IO::Socket::INET->new(
+        PeerHost => $host,
+        PeerPort => $port,
+        Timeout  => $self->connection_timeout,
     );
+
+    croak "Error ($!), can't connect to $host:$port"
+      unless defined $socket;
+
+    # enable read and write timeouts on the socket
+    IO::Socket::Timeout->enable_timeouts_on($socket);
+    # setup the timeouts
+    $socket->read_timeout($self->read_timeout);
+    # $socket->write_timeout($self->write_timeout);
+
+    return $socket;
+}
+
+sub BUILD {
+    my ($self) = @_;
+    $self->no_auto_connect
+      or $self->connect();
+}
+
+sub connect {
+    my ($self) = @_;
+    $self->_socket();
 }
 
 has _request_accumulator => (is => 'rw', init_arg => undef);
@@ -634,7 +664,7 @@ sub _parse_response {
 
     my $handle_response = $args{handle_response};
     
-    $self->_connector->perform_request(
+    $self->perform_request(
       pack( 'c a*', $request_code, $request_body // '' )
     ) or $self->_die_generic_error(
         $ERRNO, $operation_name, $bucket,
@@ -647,7 +677,7 @@ sub _parse_response {
     while (1) {
         my $response;
         # get and check response
-        if (my $raw_response = $self->_connector->read_response()) {
+        if (my $raw_response = $self->read_response()) {
             my ( $code, $body ) = unpack( 'c a*', $raw_response );
             $response = { code => $code, body => $body, error => undef };
         } else {
@@ -723,6 +753,87 @@ sub _die_generic_error {
 
     croak "Error in '$operation_name' $extra: $error";
 }
+
+
+
+
+sub perform_request {
+    my ( $self, $message ) = @_;
+    my $bytes = pack( 'N a*', bytes::length($message), $message );
+
+    $self->_send_all($bytes);    # send request
+}
+
+sub read_response {
+    my ($self)   = @_;
+    my $length = $self->_read_length();    # read first four bytes
+    return unless ($length);
+    $self->_read_all($length);             # read the message
+}
+
+sub _read_length {
+    my ($self)   = @_;
+
+    my $first_four_bytes = $self->_read_all(4);
+
+    return unpack( 'N', $first_four_bytes ) if defined $first_four_bytes;
+
+    undef;
+}
+
+sub _send_all {
+    my ( $self, $bytes ) = @_;
+
+    my $length = bytes::length($bytes);
+    my $offset = 0;
+    my $sent = 0;
+    my $socket = $self->_socket;
+
+    while ($length > 0) {
+        $sent = $socket->syswrite( $bytes, $length, $offset );
+        if (! defined $sent) {
+            $! == EINTR
+              and next;
+            return;
+        }
+
+        $sent > 0
+          or return;
+
+        $offset += $sent;
+        $length -= $sent;
+    }
+
+    return $offset;
+}
+
+sub _read_all {
+    my ( $self, $length ) = @_;
+
+    my $buffer;
+    my $offset = 0;
+    my $read = 0;
+    my $socket = $self->_socket;
+
+    while ($length > 0) {
+        $read = $socket->sysread( $buffer, $length, $offset );
+        if (! defined $read) {
+            $! == EINTR
+              and next;
+            return;
+        }
+
+        $read > 0
+          or return;
+
+        $offset += $read;
+        $length -= $read;
+    }
+
+    return $buffer;
+}
+
+
 
 1;
 
