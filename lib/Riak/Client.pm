@@ -14,9 +14,9 @@ use JSON;
 use Carp;
 use Module::Runtime qw(use_module);
 require bytes;
-use IO::Socket;
-use IO::Socket::Timeout;
 use Moo;
+
+use AnyEvent::Handle;
 
 # ABSTRACT: Fast and lightweight Perl client for Riak
 
@@ -119,30 +119,37 @@ Instead, you'll have to call C<connect()> yoruself. Boolean, Defaults to 0
 
 has no_auto_connect => ( is => 'ro', isa => Bool,  default  => sub {0} );
 
-has _socket => ( is => 'ro', lazy => 1, builder => 1 );
+=attr anyevent_mode
 
-sub _build__socket {
+If set to true, then the client instance will return AnyEvent condvars instead,
+and thus become completely asynchronous. If set to false (the default), then
+the client instance will be synchronous. However, you probably want to use
+C<AnyEvent::Riak> instead. Bool, Defaults to 0.
+
+=cut
+
+has anyevent_mode => ( is => 'ro', predicate => 'has_ae', isa => Bool, default  => sub {0} );
+
+has _cv_connected => ( is => 'ro', lazy => 1, default => sub { AE::cv });
+
+has _handle => ( is => 'ro', lazy => 1, builder => 1 );
+sub _build__handle {
     my ($self) = @_;
+    my ($host, $port) = ($self->host, $self->port);
+    my $handle;
 
-    my $host = $self->host;
-    my $port = $self->port;
-
-    my $socket = IO::Socket::INET->new(
-        PeerHost => $host,
-        PeerPort => $port,
-        Timeout  => $self->connection_timeout,
+    # TODO = timeouts
+    $handle = AnyEvent::Handle->new (
+      connect  => [$host, $port],
+      on_error => sub {
+         $handle->destroy; # explicitly destroy handle
+         croak "Error ($!) on $host:$port";
+      },
+      on_connect => sub {
+          $self->_cv_connected->send;
+      },
     );
 
-    croak "Error ($!), can't connect to $host:$port"
-      unless defined $socket;
-
-    # enable read and write timeouts on the socket
-    IO::Socket::Timeout->enable_timeouts_on($socket);
-    # setup the timeouts
-    $socket->read_timeout($self->read_timeout);
-    # $socket->write_timeout($self->write_timeout);
-
-    return $socket;
 }
 
 sub BUILD {
@@ -151,10 +158,22 @@ sub BUILD {
       or $self->connect();
 }
 
+=method connect
+
+  my $client->connect();
+
+Connects to the Riak server. This is automatically done when C<new()> is
+called, unless the C<no_auto_connect> attribute is set to true.
+
+=cut
+
 sub connect {
     my ($self) = @_;
-    $self->_socket();
+    $self->_handle();
+    return $self->_ae($self->_cv_connected);
 }
+
+sub _ae { $_[0]->has_ae ? $_[1] : $_[1]->recv }
 
 has _request_accumulator => (is => 'rw', init_arg => undef);
 
@@ -206,7 +225,7 @@ sub ping {
         request_code  => $PING_REQUEST_CODE,
         expected_code => $PING_RESPONSE_CODE,
         operation_name => 'ping',
-        body      => q(),
+        body_ref      => \q(),
     );
 }
 
@@ -226,9 +245,9 @@ sub is_alive {
 
   my $value_or_reference = $client->get(bucket => 'key');
 
-Perform a fetch operation. Expects bucket and key names. Decode the json into a
-Perl structure. if the content_type is 'application/json'. If you need the raw
-data you can use L<get_raw>.
+Perform a fetch operation. Expects bucket and key names. If the content_type is
+'application/json', decodes the JSON into a Perl structure. . If you need the
+raw data you can use L<get_raw>.
 
 =cut
 
@@ -345,7 +364,7 @@ sub del {
         operation_name => 'del',
         key            => $key,
         bucket         => $bucket,
-        body           => $body,
+        body_ref       => \$body,
     );
 }
 
@@ -380,7 +399,7 @@ sub get_keys {
         operation_name => 'get_keys',
         key            => "*",
         bucket         => $bucket,
-        body           => $body,
+        body_ref       => \$body,
         callback       => $callback,
         handle_response => \&_handle_get_keys_response
     );
@@ -440,7 +459,7 @@ sub _fetch {
         operation_name => 'get',
         key       => $key,
         bucket    => $bucket,
-        body      => $body,
+        body_ref  => \$body,
         decode    => $decode,
         handle_response => \&_handle_get_response,
     );
@@ -499,7 +518,7 @@ sub _store {
         operation_name => 'put',
         key            => $key,
         bucket         => $bucket,
-        body           => $body,
+        body_ref       => \$body,
     );
 }
 
@@ -558,7 +577,7 @@ sub query_index {
           (key => '2i query on ' . join('...', @$value_to_match) )
         : (key => $value_to_match ),
         bucket    => $bucket,
-        body      => $body,
+        body_ref  => \$body,
         handle_response => \&_handle_query_index_response,
     );
 }
@@ -618,7 +637,7 @@ sub get_bucket_props {
         request_code    => $GET_BUCKET_PROPS_REQUEST_CODE,
         expected_code   => $GET_BUCKET_PROPS_RESPONSE_CODE,
         bucket          => $bucket,
-        body            => $body,
+        body_ref        => \$body,
         handle_response => \&_handle_get_bucket_props_response,
     );
 }
@@ -644,7 +663,7 @@ sub set_bucket_props {
         request_code   => $SET_BUCKET_PROPS_REQUEST_CODE,
         expected_code  => $SET_BUCKET_PROPS_RESPONSE_CODE,
         bucket         => $bucket,
-        body           => $body,
+        body_ref       => \$body,
     );
 }
 
@@ -656,7 +675,7 @@ sub _parse_response {
     my $request_code  = $args{request_code};
     my $expected_code = $args{expected_code};
 
-    my $request_body = $args{body};
+    my $body_ref     = $args{body_ref};
     my $decode       = $args{decode};
     my $bucket       = $args{bucket};
     my $key          = $args{key};
@@ -664,11 +683,8 @@ sub _parse_response {
 
     my $handle_response = $args{handle_response};
     
-    $self->perform_request(
-      pack( 'c a*', $request_code, $request_body // '' )
-    ) or $self->_die_generic_error(
-        $ERRNO, $operation_name, $bucket,
-        $key
+    $self->_perform_request(
+      $request_code, $body_ref // \''
     );
 
 #    my $done = 0;
@@ -677,8 +693,8 @@ sub _parse_response {
     while (1) {
         my $response;
         # get and check response
-        if (my $raw_response = $self->read_response()) {
-            my ( $code, $body ) = unpack( 'c a*', $raw_response );
+        if (my $raw_response_ref = $self->read_response()) {
+            my ( $code, $body ) = unpack( 'c a*', $$raw_response_ref );
             $response = { code => $code, body => $body, error => undef };
         } else {
             $response = { code => -1,
@@ -754,21 +770,32 @@ sub _die_generic_error {
     croak "Error in '$operation_name' $extra: $error";
 }
 
-
-
-
-sub perform_request {
-    my ( $self, $message ) = @_;
-    my $bytes = pack( 'N a*', bytes::length($message), $message );
-
-    $self->_send_all($bytes);    # send request
+sub _perform_request {
+    my ( $self, $request_code, $message_ref ) = @_;
+    $self->_handle->push_write(pack('N', bytes::length($$message_ref) + 1));
+    $self->_handle->push_write(pack('c', $request_code));
+    $self->_handle->push_write($$message_ref);
 }
 
 sub read_response {
     my ($self)   = @_;
-    my $length = $self->_read_length();    # read first four bytes
-    return unless ($length);
-    $self->_read_all($length);             # read the message
+    my $cv = AE::cv;
+    $self->_handle->push_read(
+        chunk => 4,
+        sub {
+            # length arrived, decode
+            my $len = unpack "N", $_[1];
+            # now read the payload
+            $_[0]->unshift_read(
+                chunk => $len,
+                sub {
+                    my $data = $_[1];
+                    $cv->send(\$data);
+                    # handle xml
+                });
+        });
+    my $data_ref = $cv->recv();
+    return $data_ref;
 }
 
 sub _read_length {
@@ -781,39 +808,13 @@ sub _read_length {
     undef;
 }
 
-sub _send_all {
-    my ( $self, $bytes ) = @_;
-
-    my $length = bytes::length($bytes);
-    my $offset = 0;
-    my $sent = 0;
-    my $socket = $self->_socket;
-
-    while ($length > 0) {
-        $sent = $socket->syswrite( $bytes, $length, $offset );
-        if (! defined $sent) {
-            $! == EINTR
-              and next;
-            return;
-        }
-
-        $sent > 0
-          or return;
-
-        $offset += $sent;
-        $length -= $sent;
-    }
-
-    return $offset;
-}
-
 sub _read_all {
     my ( $self, $length ) = @_;
 
     my $buffer;
     my $offset = 0;
     my $read = 0;
-    my $socket = $self->_socket;
+    my $socket = $self->_handle;
 
     while ($length > 0) {
         $read = $socket->sysread( $buffer, $length, $offset );

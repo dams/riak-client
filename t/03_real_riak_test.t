@@ -6,10 +6,22 @@ BEGIN {
     }
 }
 
-use Test::More tests => 5;
+use Test::More tests => 6;
 use Test::Exception;
 use Riak::Client;
 use JSON;
+
+my ( $host, $port ) = split ':', $ENV{RIAK_PBC_HOST};
+
+subtest "connection" => sub {
+    my $client = Riak::Client->new(
+        host => $host,
+        port => $port,
+        no_auto_connect => 1,
+    );
+    ok($client, "client created");
+    ok($client->connect, "client connected");
+};
 
 subtest "simple get/set/delete test" => sub {
     plan tests => 12;
