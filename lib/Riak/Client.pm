@@ -683,9 +683,13 @@ sub _parse_response {
 
     my $handle_response = $args{handle_response};
     
-    $self->_perform_request(
-      $request_code, $body_ref // \''
-    );
+    $body_ref //= \'';
+    # $self->_handle->push_write(pack('N', bytes::length($$body_ref) + 1));
+    # $self->_handle->push_write(pack('c', $request_code));
+
+    $self->_handle->push_write(pack('N', bytes::length($$body_ref) + 1) . pack('c', $request_code) . $$body_ref);
+
+    my $cv = AE::cv;
 
 #    my $done = 0;
 #$expected_code != $GET_KEYS_RESPONSE_CODE;
@@ -768,13 +772,6 @@ sub _die_generic_error {
       and $extra = "(bucket: $bucket, key: $key)";
 
     croak "Error in '$operation_name' $extra: $error";
-}
-
-sub _perform_request {
-    my ( $self, $request_code, $message_ref ) = @_;
-    $self->_handle->push_write(pack('N', bytes::length($$message_ref) + 1));
-    $self->_handle->push_write(pack('c', $request_code));
-    $self->_handle->push_write($$message_ref);
 }
 
 sub read_response {

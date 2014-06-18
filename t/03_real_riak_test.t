@@ -14,6 +14,7 @@ use JSON;
 my ( $host, $port ) = split ':', $ENV{RIAK_PBC_HOST};
 
 subtest "connection" => sub {
+    plan tests => 2;
     my $client = Riak::Client->new(
         host => $host,
         port => $port,
