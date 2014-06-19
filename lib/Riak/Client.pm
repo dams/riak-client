@@ -18,6 +18,10 @@ use Moo;
 
 use AnyEvent::Handle;
 
+use IO::Socket::INET;
+use IO::Socket::Timeout;
+
+
 # ABSTRACT: Fast and lightweight Perl client for Riak
 
 =head1 SYNOPSIS
@@ -121,14 +125,13 @@ has no_auto_connect => ( is => 'ro', isa => Bool,  default  => sub {0} );
 
 =attr anyevent_mode
 
-If set to true, then the client instance will return AnyEvent condvars instead,
-and thus become completely asynchronous. If set to false (the default), then
-the client instance will be synchronous. However, you probably want to use
-C<AnyEvent::Riak> instead. Bool, Defaults to 0.
+Bool, Defaults to 0. If set to true, then the client instance will return
+AnyEvent condvars instead, and thus become completely asynchronous. If set to
+false (the default), then the client instance will be synchronous.
 
 =cut
 
-has anyevent_mode => ( is => 'ro', predicate => 'has_ae', isa => Bool, default  => sub {0} );
+has anyevent_mode => ( is => 'ro', reader => 'ae', isa => Bool, default  => sub {0} );
 
 has _cv_connected => ( is => 'ro', lazy => 1, default => sub { AE::cv });
 
@@ -143,13 +146,45 @@ sub _build__handle {
       connect  => [$host, $port],
       on_error => sub {
          $handle->destroy; # explicitly destroy handle
-         croak "Error ($!) on $host:$port";
+         # $self->_cv_connected->croak("Error ($!) on $host:$port");
+         croak("Error ($!) on $host:$port");
       },
-      on_connect => sub {
-          $self->_cv_connected->send;
-      },
+      rtimeout => $self->read_timeout,
+      wtimeout => $self->write_timeout,
+      on_prepare => sub { $self->connection_timeout },
+      on_connect => sub { $self->_cv_connected->send },
     );
 
+}
+
+has _socket => ( is => 'ro', lazy => 1, builder => 1 );
+sub _build__socket {
+    my ($self) = @_;
+
+    my $host = $self->host;
+    my $port = $self->port;
+
+    my $socket = IO::Socket::INET->new(
+        PeerHost => $host,
+        PeerPort => $port,
+        Timeout  => $self->connection_timeout,
+    );
+
+    croak "Error ($!), can't connect to $host:$port"
+      unless defined $socket;
+
+    $self->has_read_timeout || $self->has_write_timeout
+      or return $socket;
+
+    # enable read and write timeouts on the socket
+    IO::Socket::Timeout->enable_timeouts_on($socket);
+    # setup the timeouts
+    $self->has_read_timeout
+      and $socket->read_timeout($self->read_timeout);
+    $self->has_write_timeout
+      and $socket->write_timeout($self->write_timeout);
+
+    return $socket;
 }
 
 sub BUILD {
@@ -162,20 +197,28 @@ sub BUILD {
 
   my $client->connect();
 
+  # or in AnyEvent mode
+  my $cv = $client->connect();
+
 Connects to the Riak server. This is automatically done when C<new()> is
-called, unless the C<no_auto_connect> attribute is set to true.
+called, unless the C<no_auto_connect> attribute is set to true. In AnyEvent
+mode, returns a conditional variable,that will be triggered when connected.
 
 =cut
 
 sub connect {
     my ($self) = @_;
-    $self->_handle();
-    return $self->_ae($self->_cv_connected);
+
+    if ($self->ae) {
+        $self->_handle();
+        return $self->_cv_connected;
+    }
+
+    $self->_socket();
+    return 1;
 }
 
-sub _ae { $_[0]->has_ae ? $_[1] : $_[1]->recv }
-
-has _request_accumulator => (is => 'rw', init_arg => undef);
+has _getkeys_accumulator => (is => 'rw', init_arg => undef);
 
 sub _reloop {
     die bless \do { my $e }, '__RELOOP__';
@@ -243,7 +286,14 @@ sub is_alive {
 
 =method get
 
-  my $value_or_reference = $client->get(bucket => 'key');
+  # standard blocking mode
+  my $value = $client->get(bucket => 'key');
+
+  # asynchronous, with a callback
+  $client->get(bucket => 'key', sub { my ($value) = @_; do_stuff($value) });
+
+  # asynchronous, in AnyEvent mode
+  my $cv = $client->get(bucket => 'key');
 
 Perform a fetch operation. Expects bucket and key names. If the content_type is
 'application/json', decodes the JSON into a Perl structure. . If you need the
@@ -391,7 +441,7 @@ sub get_keys {
     my ( $self, $bucket, $callback ) = $check->(@_);
 
     # reset accumulator
-    $self->_request_accumulator([]);
+    $self->_getkeys_accumulator([]);
     my $body = RpbListKeysReq->encode( { bucket => $bucket } );
     $self->_parse_response(
         request_code   => $GET_KEYS_REQUEST_CODE,
@@ -416,10 +466,10 @@ sub _handle_get_keys_response {
         $obj->done
           and return;
     } else {
-        push @{$self->_request_accumulator}, @keys;
+        push @{$self->_getkeys_accumulator}, @keys;
         if ($obj->done) {
-            my $keys = $self->_request_accumulator;
-            $self->_request_accumulator([]);
+            my $keys = $self->_getkeys_accumulator;
+            $self->_getkeys_accumulator([]);
             return $keys;
         }
     }
@@ -684,8 +734,6 @@ sub _parse_response {
     my $handle_response = $args{handle_response};
     
     $body_ref //= \'';
-    # $self->_handle->push_write(pack('N', bytes::length($$body_ref) + 1));
-    # $self->_handle->push_write(pack('c', $request_code));
 
     $self->_handle->push_write(pack('N', bytes::length($$body_ref) + 1) . pack('c', $request_code) . $$body_ref);
 

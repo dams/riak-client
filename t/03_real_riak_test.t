@@ -13,6 +13,8 @@ use JSON;
 
 my ( $host, $port ) = split ':', $ENV{RIAK_PBC_HOST};
 
+my @buckets_to_cleanup = ( qw(foo) );
+
 subtest "connection" => sub {
     plan tests => 2;
     my $client = Riak::Client->new(
@@ -30,7 +32,7 @@ subtest "simple get/set/delete test" => sub {
     my ( $host, $port ) = split ':', $ENV{RIAK_PBC_HOST};
 
     my $client = Riak::Client->new(
-        host             => $host, port => $port,
+        host => $host, port => $port,
     );
 
     my $scalar = '3.14159';
@@ -72,11 +74,12 @@ subtest "get keys" => sub {
     plan tests => 5;
 
     my $bucket = "foo_" . int( rand(1024) ) . "_" . int( rand(1024) );
+    push @buckets_to_cleanup, $bucket;
 
     my ( $host, $port ) = split ':', $ENV{RIAK_PBC_HOST};
 
     my $client = Riak::Client->new(
-        host             => $host, port => $port,
+        host => $host, port => $port,
     );
 
     my @keys;
@@ -109,7 +112,7 @@ subtest "sequence of 1024 get/set" => sub {
     my ( $host, $port ) = split ':', $ENV{RIAK_PBC_HOST};
 
     my $client = Riak::Client->new(
-        host             => $host, port => $port,
+        host => $host, port => $port,
     );
 
     my $hash = {
@@ -121,6 +124,8 @@ subtest "sequence of 1024 get/set" => sub {
     for ( 1 .. 1024 ) {
         ( $bucket, $key ) =
           ( "bucket" . int( rand(1024) ), "key" . int( rand(1024) ) );
+
+        push @buckets_to_cleanup, $bucket;
 
         $hash->{random} = int( rand(1024) );
 
@@ -140,7 +145,7 @@ subtest "get buckets" => sub {
     my ( $host, $port ) = split ':', $ENV{RIAK_PBC_HOST};
 
     my $client = Riak::Client->new(
-        host             => $host, port => $port,
+        host => $host, port => $port,
     );
 
     my @new_buckets = (
@@ -149,6 +154,8 @@ subtest "get buckets" => sub {
         "foo_" . int( rand(1024) ) . "_" . int( rand(1024) ),
     );
 
+    push @buckets_to_cleanup, @new_buckets;
+
     my @exp_buckets = ( @{ $client->get_buckets() // [] }, @new_buckets);
 
     my $key = "key" . int( rand(1024) );
@@ -156,12 +163,16 @@ subtest "get buckets" => sub {
     $client->put( $_ => $key => $hash ) foreach (@new_buckets);
 
     my @buckets = @{ $client->get_buckets() // [] };
-
     is( scalar @buckets, scalar @exp_buckets );
 
     foreach my $bucket (@new_buckets) {
         is(grep( $bucket eq $_, @buckets), 1, "bucket $bucket is not found");
     }
+
+    my $another_client = Riak::Client->new(
+        host => $host, port => $port,
+    );
+
 };
 
 subtest "get/set buckets props" => sub {
@@ -170,7 +181,7 @@ subtest "get/set buckets props" => sub {
     my ( $host, $port ) = split ':', $ENV{RIAK_PBC_HOST};
 
     my $client = Riak::Client->new(
-        host             => $host, port => $port,
+        host => $host, port => $port,
     );
 
     my @buckets = (
@@ -178,6 +189,8 @@ subtest "get/set buckets props" => sub {
         "foo_" . int( rand(1024) ) . "_" . int( rand(1024) ),
         "foo_" . int( rand(1024) ) . "_" . int( rand(1024) ),
     );
+
+    push @buckets_to_cleanup, @buckets;
 
     my $key = "key" . int( rand(1024) );
     my $hash = { a => 1 };
@@ -192,3 +205,24 @@ subtest "get/set buckets props" => sub {
     is( scalar @props, scalar @buckets);
     is_deeply($_, $exp_props, "wrong props structure") foreach (@props);
 };
+
+END {
+
+    diag "cleaning up...";
+    my $client = Riak::Client->new(
+        host => $host, port => $port,
+    );
+
+    foreach my $bucket (@new_buckets) {
+        $client->get_keys($bucket => sub{
+                              my $key = $_; # also in $_[0]
+
+                              # you should use another client inside this callback!
+                              print "$bucket - $key\n";
+                              $another_client->del($bucket => $key);
+                          });
+    }
+
+    diag "done.";
+
+}
