@@ -6,7 +6,6 @@ use 5.010;
 use Riak::Client::PBC;
 use Type::Params qw(compile);
 use Types::Standard -types;
-use English qw(-no_match_vars );
 use Errno qw(EINTR);
 use Scalar::Util qw(blessed);
 use JSON;
@@ -20,6 +19,7 @@ use AnyEvent::Handle;
 use IO::Socket::INET;
 use IO::Socket::Timeout;
 
+use Scalar::Util qw(weaken);
 
 # ABSTRACT: Fast and lightweight Perl client for Riak
 
@@ -53,12 +53,13 @@ use IO::Socket::Timeout;
   # check if exists (like get but using less bytes in the response)
   $client->exists(foo => 'baz') or warn "oops, foo/bar does not exist";
 
-  # list keys in stream (callback only)
+  # list keys in stream
   $client->get_keys(foo => sub{
-     my $key = $_[0];
+     my ($key, $done) = @_;
 
      # you should use another client inside this callback!
      $another_client->del(foo => $key);
+
   });
   
 =head1 DESCRIPTION
@@ -140,18 +141,23 @@ sub _build__handle {
     my ($host, $port) = ($self->host, $self->port);
     my $handle;
 
+    weaken $self;
+
     # TODO = timeouts
     $handle = AnyEvent::Handle->new (
       connect  => [$host, $port],
       on_error => sub {
          $handle->destroy; # explicitly destroy handle
-         # $self->_cv_connected->croak("Error ($!) on $host:$port");
-         croak("Error ($!) on $host:$port");
+         my $command = $self->{_req_command} // "<unknown>";
+         my $bucket = $self->{_req_bucket} // "<unknown>";
+         my $key = $self->{_req_key} // "<unknown>";
+         croak("Error ($_[2]) on $host:$port, while performing: command '$command' on bucket '$bucket' and key '$key'");
       },
-      rtimeout => $self->read_timeout,
-      wtimeout => $self->write_timeout,
-      on_prepare => sub { $self->connection_timeout },
+#      rtimeout => $self->read_timeout,
+#      wtimeout => $self->write_timeout,
+#      on_prepare => sub { $self->connection_timeout },
       on_connect => sub { $self->_cv_connected->send },
+#      on_timeout => sub { print STDERR " ---- PLOP \n";},
     );
 
 }
@@ -192,7 +198,7 @@ sub BUILD {
       and return;
 
     if ($self->ae) {
-        $self->connect()->recv();
+        $self->connect();
     } else {
         $self->connect();
     }
@@ -216,7 +222,8 @@ sub connect {
 
     if ($self->ae) {
         $self->_handle();
-        return $self->_cv_connected;
+        $self->_cv_connected->recv();
+        return 1;
     }
 
     $self->_socket();
@@ -224,10 +231,6 @@ sub connect {
 }
 
 has _getkeys_accumulator => (is => 'rw', init_arg => undef);
-
-sub _reloop {
-    die bless \do { my $e }, '__RELOOP__';
-}
 
 use constant {
     # error
@@ -425,17 +428,28 @@ sub del {
     } );
 }
 
-=method get_keys
+=method my $keys = get_keys($bucket)
 
+=method get_keys($bucket, $cb->($key, $done) )
+
+  # in synchronous mode
   $client->get_keys(foo => sub{
-     my $key = $_; # also in $_[0]
+     my ($key, $done) = @_;
 
      # you should use another client inside this callback!
      $another_client->del(foo => $key);
   });
 
+  # in anyevent mode
+  my $cv = AE::cv;
+  $client->get_keys(foo => sub{
+     my ($key, $done) = @_;
+     $done and $cv->send;
+  });
+  $cv->recv();
+
 Perform a list keys operation. Receive a callback and will call it for each
-key.
+key. the key is also in C<$_>.
 
 The callback is optional, in which case an ArrayRef of B<all> the keys are
 returned. But don't do that, and always provide a callback, to avoid your RAM
@@ -469,19 +483,28 @@ sub _handle_get_keys_response {
     my $obj = RpbListKeysResp->decode( $encoded_message );
     my @keys = @{$obj->keys // []};
     if ($callback) {
-        $callback->($_) foreach @keys;
-        $obj->done
-          and return;
+
+        my $last_key;
+        my $obj_done = $obj->done
+          and $last_key = pop @keys;
+
+        $callback->($_, 0) foreach @keys;
+
+        if ($obj_done) {
+            defined $last_key and $callback->($last_key, 1);
+            return \1;
+        }
+
     } else {
         push @{$self->_getkeys_accumulator}, @keys;
         if ($obj->done) {
             my $keys = $self->_getkeys_accumulator;
             $self->_getkeys_accumulator([]);
-            return $keys;
+            return \$keys;
         }
     }
     # continuation
-    _reloop();
+    return;
 }
 
 =method exists
@@ -535,7 +558,7 @@ sub _handle_get_response {
 
     # empty content
     ref($content) eq 'ARRAY'
-      or return undef;
+      or return \undef;
 
     # TODO: handle metadata
     my $value        = $content->[0]->value;
@@ -543,10 +566,10 @@ sub _handle_get_response {
 
     # if we need to decode
     $content_type eq 'application/json' && $should_decode
-      and return decode_json($value);
+      and return \decode_json($value);
 
     # simply return the value
-    return $value;
+    return \$value;
 }
 
 sub _store {
@@ -650,9 +673,9 @@ sub _handle_query_index_response {
     my @keys = @{$obj->keys // []};
     if ($callback) {
         $callback->($_) foreach @keys;
-        return;
+        return \1;
     } else {
-        return \@keys;
+        return \\@keys;
     }
 }
 
@@ -679,9 +702,9 @@ sub _handle_get_buckets_response {
     my @buckets = @{$obj->buckets // []};
     if ($callback) {
         $callback->($_) foreach @buckets;
-        return;
+        return \1;
     } else {
-        return \@buckets;
+        return \\@buckets;
     }
 }
 
@@ -707,7 +730,7 @@ sub _handle_get_bucket_props_response {
 
     my $obj = RpbListBucketsResp->decode( $encoded_message );
     my $props = RpbBucketProps->decode($obj->buckets->[0]);
-    return { %$props }; # unblessing variable
+    return \{ %$props }; # unblessing variable
 }
 
 sub set_bucket_props {
@@ -727,6 +750,9 @@ sub set_bucket_props {
 sub _parse_response {
     my ( $self, $args ) = @_;
 
+    $self->ae
+      and goto &_parse_response_ae;
+
     my $operation_name = $args->{operation_name};
 
     my $request_code  = $args->{request_code};
@@ -742,35 +768,17 @@ sub _parse_response {
     
     $body_ref //= \'';
 
-    if ($self->ae) {
-        $self->_handle->push_write(pack('N', bytes::length($$body_ref) + 1) . pack('c', $request_code) . $$body_ref);
-    } else {
-        $self->_send_bytes($request_code, $body_ref);
-    }
+    $self->_send_bytes($request_code, $body_ref);
 
     while (1) {
         my $response;
         # get and check response
-        if (my $raw_response_ref = $self->read_response()) {
-            my ( $code, $body ) = unpack( 'c a*', $$raw_response_ref );
-            $response = { code => $code, body => $body, error => undef };
-        } else {
-            $response = { code => -1,
-                          body => undef,
-                          error => $ERRNO || "Socket Closed" };
-        }
+        my $raw_response_ref = $self->read_response()
+          or $self->_die_generic_error( $! || "Socket Closed", $operation_name, $bucket, $key );
 
-        my ($response_code, $response_body, $response_error) = @{$response}{qw(code body error)};
+        my ( $response_code, $response_body ) = unpack( 'c a*', $$raw_response_ref );
 
-        # in case of internal error message
-        defined $response_error
-          and $self->_die_generic_error(
-              $response_error, $operation_name, $bucket,
-              $key
-          );
-    
         # in case of error msg
-
         if ($response_code == ERROR_RESPONSE_CODE) {
             my $decoded_message = RpbErrorResp->decode($response_body);
             my $errmsg  = $decoded_message->errmsg;
@@ -795,23 +803,93 @@ sub _parse_response {
 
         # handle the response.
         my $ret;
-        eval { $ret = $handle_response->(
-                        $self,
-                        $response_body,
-                        $bucket,
-                        $key,
-                        $callback,
-                        $decode );
-                1; }
-          and return $ret;
+        $ret = $handle_response->(
+                                  $self,
+                                  $response_body,
+                                  $bucket,
+                                  $key,
+                                  $callback,
+                                  $decode )
+          # If ret is undef, means we need to get more data
+          or next;
 
-        # there were an exception. Is it a continuation or a real exception ?
+        return $$ret;
 
-        ref $@ eq '__RELOOP__'
-          or die $@;
     }
 }
 
+sub _parse_response_ae {
+    my ( $self, $args ) = @_;
+
+    my $operation_name = $args->{operation_name};
+
+    my $request_code  = $args->{request_code};
+    my $expected_code = $args->{expected_code};
+
+    my $body_ref     = $args->{body_ref};
+    my $decode       = $args->{decode};
+    my $bucket       = $args->{bucket};
+    my $key          = $args->{key};
+    my $callback     = $args->{callback};
+
+    my $handle_response = $args->{handle_response};
+    
+    $body_ref //= \'';
+
+    $self->_handle->push_write(pack('N', bytes::length($$body_ref) + 1) . pack('c', $request_code) . $$body_ref);
+
+    while (1) {
+        my $response;
+        # get and check response
+
+        my $cv = AE::cv;
+
+        $self->_handle->push_read( chunk => 4, sub {
+            # length arrived, decode
+            my $len = unpack "N", $_[1];
+            # now read the payload
+            $_[0]->unshift_read( chunk => $len, sub {
+                my ( $response_code, $response_body ) = unpack( 'c a*', $_[1] );
+
+                # in case of error msg
+                if ($response_code == ERROR_RESPONSE_CODE) {
+                    my $decoded_message = RpbErrorResp->decode($response_body);
+                    my $errmsg  = $decoded_message->errmsg;
+                    my $errcode = $decoded_message->errcode;
+
+                    $self->_die_generic_error( "Riak Error (code: $errcode) '$errmsg'",
+                                               $operation_name, $bucket, $key
+                                             );
+                }
+
+                # check if we have what we want
+                $response_code != $expected_code
+                  and $self->_die_generic_error(
+                                                "Unexpected Response Code in (got: $response_code, expected: $expected_code)",
+                                                $operation_name, $bucket, $key
+                                               );
+    
+                # if we don't need to handle the response, return success
+                $handle_response
+                  or $cv->send(\1), return;
+
+                # handle the response.
+                my $ret = $handle_response->( $self,
+                                              $response_body,
+                                              $bucket,
+                                              $key,
+                                              $callback,
+                                              $decode );
+                $cv->send($ret);
+
+              });
+        });
+
+        my $res = $cv->recv();
+        $res and
+          return $$res;
+    }
+}
 
 sub _die_generic_error {
     my ( $self, $error, $operation_name, $bucket, $key ) = @_;
@@ -828,33 +906,9 @@ sub _die_generic_error {
     croak "Error in '$operation_name' $extra: $error";
 }
 
-sub read_response_ae {
-    my ($self)   = @_;
-}
-
 sub read_response {
     my ($self) = @_;
-    if ($self->ae) {
-        my $cv = AE::cv;
-            $self->_handle->push_read(
-            chunk => 4,
-            sub {
-                # length arrived, decode
-                my $len = unpack "N", $_[1];
-                # now read the payload
-                $_[0]->unshift_read(
-                    chunk => $len,
-                    sub {
-                        my $data = $_[1];
-                        $cv->send(\$data);
-                        # handle xml
-                    });
-            });
-        my $data_ref = $cv->recv();
-        return $data_ref;
-    } else {
-        $self->_read_bytes(unpack( 'N', ${ $self->_read_bytes(4) // return } ));
-    }
+    $self->_read_bytes(unpack( 'N', ${ $self->_read_bytes(4) // return } ));
 }
 
 sub _read_bytes {

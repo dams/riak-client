@@ -6,16 +6,22 @@ BEGIN {
     }
 }
 
-use Test::More tests => 12;
+use Test::More;
 use Test::Exception;
 use Riak::Client;
 use JSON;
+
+
+my @additional_options = ( [ anyevent_mode => 1]);
+
+
+plan tests => 6 * scalar(@additional_options);
 
 my ( $host, $port ) = split ':', $ENV{RIAK_PBC_HOST};
 
 my @buckets_to_cleanup = ( qw(foo) );
 
-foreach my $additional_options ( [], [ anyevent_mode => 1] ) {
+foreach my $additional_options ( @additional_options ) {
 
 diag "";
 diag "";
@@ -92,7 +98,7 @@ subtest "get keys" => sub {
     );
 
     my @keys;
-    $client->get_keys( $bucket => sub { push @keys, $_[0] } );
+    $client->get_keys( $bucket => sub { print STDERR " CALLBACK CALLED\n"; push @keys, $_[0] } );
 
     foreach my $key (@keys) {
         $client->del( $bucket => $key );
