@@ -189,7 +189,13 @@ sub _build__socket {
 sub BUILD {
     my ($self) = @_;
     $self->no_auto_connect
-      or $self->connect();
+      and return;
+
+    if ($self->ae) {
+        $self->connect()->recv();
+    } else {
+        $self->connect();
+    }
 }
 
 =method connect
@@ -742,11 +748,6 @@ sub _parse_response {
         $self->_send_bytes($request_code, $body_ref);
     }
 
-    my $cv = AE::cv;
-
-#    my $done = 0;
-#$expected_code != GET_KEYS_RESPONSE_CODE;
-
     while (1) {
         my $response;
         # get and check response
@@ -829,28 +830,31 @@ sub _die_generic_error {
 
 sub read_response_ae {
     my ($self)   = @_;
-    my $cv = AE::cv;
-    $self->_handle->push_read(
-        chunk => 4,
-        sub {
-            # length arrived, decode
-            my $len = unpack "N", $_[1];
-            # now read the payload
-            $_[0]->unshift_read(
-                chunk => $len,
-                sub {
-                    my $data = $_[1];
-                    $cv->send(\$data);
-                    # handle xml
-                });
-        });
-    my $data_ref = $cv->recv();
-    return $data_ref;
 }
 
 sub read_response {
     my ($self) = @_;
-    $self->_read_bytes(unpack( 'N', ${ $self->_read_bytes(4) // return } ));
+    if ($self->ae) {
+        my $cv = AE::cv;
+            $self->_handle->push_read(
+            chunk => 4,
+            sub {
+                # length arrived, decode
+                my $len = unpack "N", $_[1];
+                # now read the payload
+                $_[0]->unshift_read(
+                    chunk => $len,
+                    sub {
+                        my $data = $_[1];
+                        $cv->send(\$data);
+                        # handle xml
+                    });
+            });
+        my $data_ref = $cv->recv();
+        return $data_ref;
+    } else {
+        $self->_read_bytes(unpack( 'N', ${ $self->_read_bytes(4) // return } ));
+    }
 }
 
 sub _read_bytes {

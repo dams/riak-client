@@ -6,7 +6,7 @@ BEGIN {
     }
 }
 
-use Test::More tests => 6;
+use Test::More tests => 12;
 use Test::Exception;
 use Riak::Client;
 use JSON;
@@ -15,9 +15,16 @@ my ( $host, $port ) = split ':', $ENV{RIAK_PBC_HOST};
 
 my @buckets_to_cleanup = ( qw(foo) );
 
+foreach my $additional_options ( [], [ anyevent_mode => 1] ) {
+
+diag "";
+diag "";
+diag($additional_options->[0] // 'no additional option');
+diag "";
 subtest "connection" => sub {
     plan tests => 2;
     my $client = Riak::Client->new(
+        @$additional_options,
         host => $host,
         port => $port,
         no_auto_connect => 1,
@@ -32,6 +39,7 @@ subtest "simple get/set/delete test" => sub {
     my ( $host, $port ) = split ':', $ENV{RIAK_PBC_HOST};
 
     my $client = Riak::Client->new(
+        @$additional_options,
         host => $host, port => $port,
     );
 
@@ -79,6 +87,7 @@ subtest "get keys" => sub {
     my ( $host, $port ) = split ':', $ENV{RIAK_PBC_HOST};
 
     my $client = Riak::Client->new(
+        @$additional_options,
         host => $host, port => $port,
     );
 
@@ -112,6 +121,7 @@ subtest "sequence of 1024 get/set" => sub {
     my ( $host, $port ) = split ':', $ENV{RIAK_PBC_HOST};
 
     my $client = Riak::Client->new(
+        @$additional_options,
         host => $host, port => $port,
     );
 
@@ -145,6 +155,7 @@ subtest "get buckets" => sub {
     my ( $host, $port ) = split ':', $ENV{RIAK_PBC_HOST};
 
     my $client = Riak::Client->new(
+        @$additional_options,
         host => $host, port => $port,
     );
 
@@ -170,6 +181,7 @@ subtest "get buckets" => sub {
     }
 
     my $another_client = Riak::Client->new(
+        @$additional_options,
         host => $host, port => $port,
     );
 
@@ -181,6 +193,7 @@ subtest "get/set buckets props" => sub {
     my ( $host, $port ) = split ':', $ENV{RIAK_PBC_HOST};
 
     my $client = Riak::Client->new(
+        @$additional_options,
         host => $host, port => $port,
     );
 
@@ -206,10 +219,13 @@ subtest "get/set buckets props" => sub {
     is_deeply($_, $exp_props, "wrong props structure") foreach (@props);
 };
 
+}
+
 END {
 
     diag "cleaning up...";
     my $client = Riak::Client->new(
+        @$additional_options,
         host => $host, port => $port,
     );
 
