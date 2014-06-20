@@ -9,7 +9,6 @@ use Types::Standard -types;
 use English qw(-no_match_vars );
 use Errno qw(EINTR);
 use Scalar::Util qw(blessed);
-use Const::Fast;
 use JSON;
 use Carp;
 use Module::Runtime qw(use_module);
@@ -224,35 +223,37 @@ sub _reloop {
     die bless \do { my $e }, '__RELOOP__';
 }
 
-# error
-const my $ERROR_RESPONSE_CODE            => 0;
-# ping
-const my $PING_REQUEST_CODE              => 1;
-const my $PING_RESPONSE_CODE             => 2;
-# get, get_raw
-const my $GET_REQUEST_CODE               => 9;
-const my $GET_RESPONSE_CODE              => 10;
-# put, put_raw
-const my $PUT_REQUEST_CODE               => 11;
-const my $PUT_RESPONSE_CODE              => 12;
-# get_buckets
-const my $GET_BUCKETS_REQUEST_CODE       => 15;
-const my $GET_BUCKETS_RESPONSE_CODE      => 16;
-# get_keys
-const my $GET_KEYS_REQUEST_CODE          => 17;
-const my $GET_KEYS_RESPONSE_CODE         => 18;
-# del
-const my $DEL_REQUEST_CODE               => 13;
-const my $DEL_RESPONSE_CODE              => 14;
-# get_bucket_props
-const my $GET_BUCKET_PROPS_REQUEST_CODE  => 19;
-const my $GET_BUCKET_PROPS_RESPONSE_CODE => 20;
-# set_bucket_props
-const my $SET_BUCKET_PROPS_REQUEST_CODE  => 21;
-const my $SET_BUCKET_PROPS_RESPONSE_CODE => 22;
-# quesry_index
-const my $QUERY_INDEX_REQUEST_CODE       => 25;
-const my $QUERY_INDEX_RESPONSE_CODE      => 26;
+use constant {
+    # error
+    ERROR_RESPONSE_CODE            => 0,
+    # ping
+    PING_REQUEST_CODE              => 1,
+    PING_RESPONSE_CODE             => 2,
+    # get, get_raw
+    GET_REQUEST_CODE               => 9,
+    GET_RESPONSE_CODE              => 10,
+    # put, put_raw
+    PUT_REQUEST_CODE               => 11,
+    PUT_RESPONSE_CODE              => 12,
+    # get_buckets
+    GET_BUCKETS_REQUEST_CODE       => 15,
+    GET_BUCKETS_RESPONSE_CODE      => 16,
+    # get_keys
+    GET_KEYS_REQUEST_CODE          => 17,
+    GET_KEYS_RESPONSE_CODE         => 18,
+    # del
+    DEL_REQUEST_CODE               => 13,
+    DEL_RESPONSE_CODE              => 14,
+    # get_bucket_props
+    GET_BUCKET_PROPS_REQUEST_CODE  => 19,
+    GET_BUCKET_PROPS_RESPONSE_CODE => 20,
+    # set_bucket_props
+    SET_BUCKET_PROPS_REQUEST_CODE  => 21,
+    SET_BUCKET_PROPS_RESPONSE_CODE => 22,
+    # quesry_index
+    QUERY_INDEX_REQUEST_CODE       => 25,
+    QUERY_INDEX_RESPONSE_CODE      => 26,
+};
 
 =method ping
 
@@ -264,12 +265,12 @@ Perform a ping operation. Will die in case of error. See C<is_alive()>
 =cut
 
 sub ping {
-    $_[0]->_parse_response(
-        request_code  => $PING_REQUEST_CODE,
-        expected_code => $PING_RESPONSE_CODE,
+    $_[0]->_parse_response( {
+        request_code  => PING_REQUEST_CODE,
+        expected_code => PING_RESPONSE_CODE,
         operation_name => 'ping',
         body_ref      => \q(),
-    );
+    } );
 }
 
 =method is_alive
@@ -408,14 +409,14 @@ sub del {
         }
     );
 
-    $self->_parse_response(
-        request_code   => $DEL_REQUEST_CODE,
-        expected_code  => $DEL_RESPONSE_CODE,
+    $self->_parse_response( {
+        request_code   => DEL_REQUEST_CODE,
+        expected_code  => DEL_RESPONSE_CODE,
         operation_name => 'del',
         key            => $key,
         bucket         => $bucket,
         body_ref       => \$body,
-    );
+    } );
 }
 
 =method get_keys
@@ -443,16 +444,16 @@ sub get_keys {
     # reset accumulator
     $self->_getkeys_accumulator([]);
     my $body = RpbListKeysReq->encode( { bucket => $bucket } );
-    $self->_parse_response(
-        request_code   => $GET_KEYS_REQUEST_CODE,
-        expected_code  => $GET_KEYS_RESPONSE_CODE,
+    $self->_parse_response( {
+        request_code   => GET_KEYS_REQUEST_CODE,
+        expected_code  => GET_KEYS_RESPONSE_CODE,
         operation_name => 'get_keys',
         key            => "*",
         bucket         => $bucket,
         body_ref       => \$body,
         callback       => $callback,
         handle_response => \&_handle_get_keys_response
-    );
+    } );
 }
 
 sub _handle_get_keys_response {
@@ -503,16 +504,16 @@ sub _fetch {
         }
     );
 
-    $self->_parse_response(
-        request_code  => $GET_REQUEST_CODE,
-        expected_code => $GET_RESPONSE_CODE,
+    $self->_parse_response( {
+        request_code  => GET_REQUEST_CODE,
+        expected_code => GET_RESPONSE_CODE,
         operation_name => 'get',
         key       => $key,
         bucket    => $bucket,
         body_ref  => \$body,
         decode    => $decode,
         handle_response => \&_handle_get_response,
-    );
+    } );
 }
 
 sub _handle_get_response {
@@ -562,14 +563,14 @@ sub _store {
         }
     );
 
-    $self->_parse_response(
-        request_code   => $PUT_REQUEST_CODE,
-        expected_code  => $PUT_RESPONSE_CODE,
+    $self->_parse_response( {
+        request_code   => PUT_REQUEST_CODE,
+        expected_code  => PUT_RESPONSE_CODE,
         operation_name => 'put',
         key            => $key,
         bucket         => $bucket,
         body_ref       => \$body,
-    );
+    } );
 }
 
 =method query_index
@@ -619,9 +620,9 @@ sub query_index {
         }
     );
 
-    $self->_parse_response(
-        request_code   => $QUERY_INDEX_REQUEST_CODE,
-        expected_code  => $QUERY_INDEX_RESPONSE_CODE,
+    $self->_parse_response( {
+        request_code   => QUERY_INDEX_REQUEST_CODE,
+        expected_code  => QUERY_INDEX_RESPONSE_CODE,
         operation_name => 'query_index',
         $query_type_is_eq ?
           (key => '2i query on ' . join('...', @$value_to_match) )
@@ -629,7 +630,7 @@ sub query_index {
         bucket    => $bucket,
         body_ref  => \$body,
         handle_response => \&_handle_query_index_response,
-    );
+    } );
 }
 
 sub _handle_query_index_response {
@@ -653,13 +654,13 @@ sub get_buckets {
     state $check = compile(Any, Optional[CodeRef]);
     my ( $self, $callback ) = $check->(@_);
 
-    $self->_parse_response(
-        request_code    => $GET_BUCKETS_REQUEST_CODE,
-        expected_code   => $GET_BUCKETS_RESPONSE_CODE,
+    $self->_parse_response( {
+        request_code    => GET_BUCKETS_REQUEST_CODE,
+        expected_code   => GET_BUCKETS_RESPONSE_CODE,
         operation_name => 'get_buckets',
         callback        => $callback,
         handle_response => \&_handle_get_buckets_response,
-    );
+    } );
 }
 
 sub _handle_get_buckets_response {
@@ -683,13 +684,13 @@ sub get_bucket_props {
     my ( $self, $bucket ) = $check->(@_);
 
     my $body = RpbGetBucketReq->encode( { bucket => $bucket } );
-    $self->_parse_response(
-        request_code    => $GET_BUCKET_PROPS_REQUEST_CODE,
-        expected_code   => $GET_BUCKET_PROPS_RESPONSE_CODE,
+    $self->_parse_response( {
+        request_code    => GET_BUCKET_PROPS_REQUEST_CODE,
+        expected_code   => GET_BUCKET_PROPS_RESPONSE_CODE,
         bucket          => $bucket,
         body_ref        => \$body,
         handle_response => \&_handle_get_bucket_props_response,
-    );
+    } );
 }
 
 sub _handle_get_bucket_props_response {
@@ -709,38 +710,42 @@ sub set_bucket_props {
     $props->{n_val} && $props->{n_val} < 0 and croak 'n_val should be possitive integer';
 
     my $body = RpbSetBucketReq->encode({ bucket => $bucket, props => $props });
-    $self->_parse_response(
-        request_code   => $SET_BUCKET_PROPS_REQUEST_CODE,
-        expected_code  => $SET_BUCKET_PROPS_RESPONSE_CODE,
+    $self->_parse_response( {
+        request_code   => SET_BUCKET_PROPS_REQUEST_CODE,
+        expected_code  => SET_BUCKET_PROPS_RESPONSE_CODE,
         bucket         => $bucket,
         body_ref       => \$body,
-    );
+    } );
 }
 
 sub _parse_response {
-    my ( $self, %args ) = @_;
-    
-    my $operation_name = $args{operation_name};
+    my ( $self, $args ) = @_;
 
-    my $request_code  = $args{request_code};
-    my $expected_code = $args{expected_code};
+    my $operation_name = $args->{operation_name};
 
-    my $body_ref     = $args{body_ref};
-    my $decode       = $args{decode};
-    my $bucket       = $args{bucket};
-    my $key          = $args{key};
-    my $callback = $args{callback};
+    my $request_code  = $args->{request_code};
+    my $expected_code = $args->{expected_code};
 
-    my $handle_response = $args{handle_response};
+    my $body_ref     = $args->{body_ref};
+    my $decode       = $args->{decode};
+    my $bucket       = $args->{bucket};
+    my $key          = $args->{key};
+    my $callback     = $args->{callback};
+
+    my $handle_response = $args->{handle_response};
     
     $body_ref //= \'';
 
-    $self->_handle->push_write(pack('N', bytes::length($$body_ref) + 1) . pack('c', $request_code) . $$body_ref);
+    if ($self->ae) {
+        $self->_handle->push_write(pack('N', bytes::length($$body_ref) + 1) . pack('c', $request_code) . $$body_ref);
+    } else {
+        $self->_send_bytes($request_code, $body_ref);
+    }
 
     my $cv = AE::cv;
 
 #    my $done = 0;
-#$expected_code != $GET_KEYS_RESPONSE_CODE;
+#$expected_code != GET_KEYS_RESPONSE_CODE;
 
     while (1) {
         my $response;
@@ -765,7 +770,7 @@ sub _parse_response {
     
         # in case of error msg
 
-        if ($response_code == $ERROR_RESPONSE_CODE) {
+        if ($response_code == ERROR_RESPONSE_CODE) {
             my $decoded_message = RpbErrorResp->decode($response_body);
             my $errmsg  = $decoded_message->errmsg;
             my $errcode = $decoded_message->errcode;
@@ -822,7 +827,7 @@ sub _die_generic_error {
     croak "Error in '$operation_name' $extra: $error";
 }
 
-sub read_response {
+sub read_response_ae {
     my ($self)   = @_;
     my $cv = AE::cv;
     $self->_handle->push_read(
@@ -843,23 +848,18 @@ sub read_response {
     return $data_ref;
 }
 
-sub _read_length {
-    my ($self)   = @_;
-
-    my $first_four_bytes = $self->_read_all(4);
-
-    return unpack( 'N', $first_four_bytes ) if defined $first_four_bytes;
-
-    undef;
+sub read_response {
+    my ($self) = @_;
+    $self->_read_bytes(unpack( 'N', ${ $self->_read_bytes(4) // return } ));
 }
 
-sub _read_all {
+sub _read_bytes {
     my ( $self, $length ) = @_;
 
     my $buffer;
     my $offset = 0;
     my $read = 0;
-    my $socket = $self->_handle;
+    my $socket = $self->_socket;
 
     while ($length > 0) {
         $read = $socket->sysread( $buffer, $length, $offset );
@@ -876,7 +876,36 @@ sub _read_all {
         $length -= $read;
     }
 
-    return $buffer;
+    return \$buffer;
+}
+
+
+sub _send_bytes {
+    my ( $self, $request_code, $body_ref ) = @_;
+
+    my $bytes = pack('N', my $length = (bytes::length($$body_ref) + 1)) . pack('c', $request_code) . $$body_ref;
+
+    $length += 4;
+    my $offset = 0;
+    my $sent = 0;
+    my $socket = $self->_socket;
+
+    while ($length > 0) {
+        $sent = $socket->syswrite( $bytes, $length, $offset );
+        if (! defined $sent) {
+            $! == EINTR
+              and next;
+            return;
+        }
+
+        $sent > 0
+          or return;
+
+        $offset += $sent;
+        $length -= $sent;
+    }
+
+    return $offset;
 }
 
 
