@@ -64,9 +64,12 @@ use Scalar::Util qw(weaken);
   
 =head1 DESCRIPTION
 
-Riak::Client is a very light (and fast) Perl client for Riak using PBC
-interface. Support operations like ping, get, exists, put, del, and secondary
-indexes (so-called 2i) setting and querying.
+Riak::Client is a fast and light Perl client for Riak using PBC interface.
+It supports operations like ping, get, exists, put, del, and secondary indexes
+(so-called 2i) setting and querying.
+
+It has two modes, a traditional procedural mode, and an event based mode, using
+AnyEvent.
 
 It started as a for of Riak::Light to fix some bugs, but actually ended up in a
 complete rewrite with more features, but the same performance
@@ -125,15 +128,18 @@ has no_auto_connect => ( is => 'ro', isa => Bool,  default  => sub {0} );
 
 =attr anyevent_mode
 
-Bool, Defaults to 0. If set to true, then the client instance will return
-AnyEvent condvars instead, and thus become completely asynchronous. If set to
-false (the default), then the client instance will be synchronous.
+Bool, Defaults to 0. If set to true, then all methods can receive a callback,
+as last argument. If present, the method will return immediately, and the
+callback will be executed upon completion of the operation, receiving a condvar
+as first and only argument. If set to false (the default), then the client
+instance will be synchronous.
 
 =cut
 
 has anyevent_mode => ( is => 'ro', reader => 'ae', isa => Bool, default  => sub {0} );
 
 has _cv_connected => ( is => 'ro', lazy => 1, default => sub { AE::cv });
+has _requests_lock => ( is => 'rw', default => sub { undef });
 
 has _handle => ( is => 'ro', lazy => 1, builder => 1 );
 sub _build__handle {
@@ -222,8 +228,13 @@ sub connect {
 
     if ($self->ae) {
         $self->_handle();
-        $self->_cv_connected->recv();
-        return 1;
+        if (my $cb = ref $_[-1] eq 'CODE' ? pop : undef) {
+            $self->_cv_connected->cb($cb);
+            return;
+        } else {
+            $self->_cv_connected->recv;
+            return 1;
+        }
     }
 
     $self->_socket();
@@ -274,11 +285,14 @@ Perform a ping operation. Will die in case of error. See C<is_alive()>
 =cut
 
 sub ping {
+    my $cb = ref $_[-1] eq 'CODE' ? pop : undef;
+
     $_[0]->_parse_response( {
         request_code  => PING_REQUEST_CODE,
         expected_code => PING_RESPONSE_CODE,
         operation_name => 'ping',
         body_ref      => \q(),
+        callback => $cb,
     } );
 }
 
@@ -364,7 +378,7 @@ sub put {
     state $check = compile(Any, Str, Str, Any, Optional[Str], Optional[HashRef[Str]]);
     my ( $self, $bucket, $key, $value, $content_type, $indexes ) = $check->(@_);
 
-    ($content_type ||= 'application/json')
+    ($content_type //= 'application/json')
       eq 'application/json'
         and $value = encode_json($value);
 
@@ -472,38 +486,50 @@ sub get_keys {
         bucket         => $bucket,
         body_ref       => \$body,
         callback       => $callback,
-        handle_response => \&_handle_get_keys_response
+        handle_response => \&_handle_get_keys_response,
+        lock_requests => 1,
     } );
 }
 
 sub _handle_get_keys_response {
-    my ( $self, $encoded_message, $bucket, $key, $callback ) = @_;
+    my ( $self, $encoded_message, $bucket, $key, $user_callback ) = @_;
 
     # TODO: support for 1.4 (which provides 'stream', 'return_terms', and 'stream')
     my $obj = RpbListKeysResp->decode( $encoded_message );
     my @keys = @{$obj->keys // []};
-    if ($callback) {
 
-        my $last_key;
-        my $obj_done = $obj->done
-          and $last_key = pop @keys;
-
-        $callback->($_, 0) foreach @keys;
-
-        if ($obj_done) {
-            defined $last_key and $callback->($last_key, 1);
-            return \1;
-        }
-
-    } else {
+    # case 1 : no user callback
+    if (! $user_callback ) {
+        # accumulate results
         push @{$self->_getkeys_accumulator}, @keys;
-        if ($obj->done) {
-            my $keys = $self->_getkeys_accumulator;
-            $self->_getkeys_accumulator([]);
-            return \$keys;
-        }
+
+        # if more to come, return by saying so
+        $obj->done
+          or return (undef, 1);
+
+        # all results are there, return the whole
+        my $keys = $self->_getkeys_accumulator;
+        $self->_getkeys_accumulator([]);
+        return \$keys;
     }
-    # continuation
+
+    # case 2 : we have a user callback
+
+    my $last_key;
+    my $obj_done = $obj->done
+      and $last_key = pop @keys;
+
+    # second arg = more to come
+    $user_callback->($_, 1) foreach @keys;
+
+    # if more to come, return by saying so
+    $obj->done
+      or return (undef, 1);
+
+    # process last keys if any
+    defined $last_key and $user_callback->($last_key);
+
+    # means: nothing left to do, all results processed through callback
     return;
 }
 
@@ -632,7 +658,7 @@ Based on the example in C<put>, here is how to query it:
 
 sub query_index {
     state $check = compile(Any, Str, Str, Str|ArrayRef, Optional[CodeRef]);
-    my ( $self, $bucket, $index, $value_to_match, $callback ) = $check->(@_);
+    my ( $self, $bucket, $index, $value_to_match, $user_callback ) = $check->(@_);
 
     my $query_type_is_eq = 0; # eq
     ref $value_to_match
@@ -645,7 +671,6 @@ sub query_index {
             ( range_min => $value_to_match->[0],
               range_max => $value_to_match->[1] )
             : (key => $value_to_match ),
-            callback => $callback
         }
     );
 
@@ -659,53 +684,45 @@ sub query_index {
         bucket    => $bucket,
         body_ref  => \$body,
         handle_response => \&_handle_query_index_response,
+        callback => $user_callback,
+        lock_requests => 1,
     } );
 }
 
 sub _handle_query_index_response {
-    my ( $self, $encoded_message, $bucket, $key, $callback ) = @_;
+    my ( $self, $encoded_message, $bucket, $key, $user_callback ) = @_;
     
-    defined $encoded_message
-      or $self->_die_generic_error( "Undefined Message", 'query_index', $bucket, $key );
-
     my $obj = RpbIndexResp->decode( $encoded_message );
-
     my @keys = @{$obj->keys // []};
-    if ($callback) {
-        $callback->($_) foreach @keys;
-        return \1;
-    } else {
-        return \\@keys;
-    }
+
+    # case 1 : no user callback
+    $user_callback
+      or return \\@keys;
+
+    # case 2 : we have a user callback
+    $user_callback->($_) foreach @keys;
+
+    # means: nothing left to do, all results processed through callback
+    return;
+
 }
 
 sub get_buckets {
-    state $check = compile(Any, Optional[CodeRef]);
-    my ( $self, $callback ) = $check->(@_);
+    state $check = compile(Any);
+    my ( $self ) = $check->(@_);
 
     $self->_parse_response( {
         request_code    => GET_BUCKETS_REQUEST_CODE,
         expected_code   => GET_BUCKETS_RESPONSE_CODE,
         operation_name => 'get_buckets',
-        callback        => $callback,
         handle_response => \&_handle_get_buckets_response,
     } );
 }
 
 sub _handle_get_buckets_response {
-    my ( $self, $encoded_message, $bucket, $key, $callback ) = @_;
-
-    defined $encoded_message
-      or $self->_die_generic_error( "Undefined Message", 'get_buckets' );
-
+    my ( $self, $encoded_message, $bucket, $key ) = @_;
     my $obj = RpbListBucketsResp->decode( $encoded_message );
-    my @buckets = @{$obj->buckets // []};
-    if ($callback) {
-        $callback->($_) foreach @buckets;
-        return \1;
-    } else {
-        return \\@buckets;
-    }
+    return \($obj->buckets // []);
 }
 
 sub get_bucket_props {
@@ -724,9 +741,6 @@ sub get_bucket_props {
 
 sub _handle_get_bucket_props_response {
     my ( $self, $encoded_message, $bucket ) = @_;
-
-    defined $encoded_message
-      or $self->_die_generic_error( "Undefined Message", 'get_bucket_props', $bucket );
 
     my $obj = RpbListBucketsResp->decode( $encoded_message );
     my $props = RpbBucketProps->decode($obj->buckets->[0]);
@@ -821,6 +835,25 @@ sub _parse_response {
 sub _parse_response_ae {
     my ( $self, $args ) = @_;
 
+
+    # OK so Riak doesn't support pipelining. That means that you can't send a
+    # request before the previous one has returned. Especially true for
+    # multiple response requests, like get_keys. So we need a way to detect
+    # that a running request is occuring, and we can't push_read before the
+    # previous request is done.
+
+    # if there is a lock on the requests
+    if ($self->_requests_lock) {
+        # wait to acquire lock
+        $self->_requests_lock->recv();
+        # delete the lock
+        $self->_requests_lock(undef);
+    }
+
+    # if this request can have multiple responses, set the lock.
+    $args->{lock_requests}
+      and (say STDERR "TAKING LOCK"), $self->_requests_lock(AE::cv);
+
     my $operation_name = $args->{operation_name};
 
     my $request_code  = $args->{request_code};
@@ -830,7 +863,7 @@ sub _parse_response_ae {
     my $decode       = $args->{decode};
     my $bucket       = $args->{bucket};
     my $key          = $args->{key};
-    my $callback     = $args->{callback};
+    my $user_callback     = $args->{callback};
 
     my $handle_response = $args->{handle_response};
     
@@ -838,57 +871,89 @@ sub _parse_response_ae {
 
     $self->_handle->push_write(pack('N', bytes::length($$body_ref) + 1) . pack('c', $request_code) . $$body_ref);
 
-    while (1) {
-        my $response;
-        # get and check response
+    # maybe we'll use a cv to force synchronous call
+    my $cv;
 
-        my $cv = AE::cv;
-
-        $self->_handle->push_read( chunk => 4, sub {
-            # length arrived, decode
-            my $len = unpack "N", $_[1];
-            # now read the payload
-            $_[0]->unshift_read( chunk => $len, sub {
-                my ( $response_code, $response_body ) = unpack( 'c a*', $_[1] );
-
-                # in case of error msg
-                if ($response_code == ERROR_RESPONSE_CODE) {
-                    my $decoded_message = RpbErrorResp->decode($response_body);
-                    my $errmsg  = $decoded_message->errmsg;
-                    my $errcode = $decoded_message->errcode;
-
-                    $self->_die_generic_error( "Riak Error (code: $errcode) '$errmsg'",
-                                               $operation_name, $bucket, $key
-                                             );
-                }
-
-                # check if we have what we want
-                $response_code != $expected_code
-                  and $self->_die_generic_error(
-                                                "Unexpected Response Code in (got: $response_code, expected: $expected_code)",
-                                                $operation_name, $bucket, $key
-                                               );
-    
-                # if we don't need to handle the response, return success
-                $handle_response
-                  or $cv->send(\1), return;
-
-                # handle the response.
-                my $ret = $handle_response->( $self,
-                                              $response_body,
-                                              $bucket,
-                                              $key,
-                                              $callback,
-                                              $decode );
-                $cv->send($ret);
-
-              });
-        });
-
-        my $res = $cv->recv();
-        $res and
-          return $$res;
+    my $main_callback;
+    if ($user_callback) {
+        $main_callback = sub { $user_callback->(${$_[0]}); }
+    } else {
+        $cv = AE::cv;
+        $main_callback = sub { $cv->send($_[0]); }
     }
+
+    my $reader_callback;
+    $reader_callback = sub {
+        # length arrived, decode
+        my $len = unpack "N", $_[1];
+        # now read the payload
+        $_[0]->unshift_read( chunk => $len, sub {
+            my ( $response_code, $response_body ) = unpack( 'c a*', $_[1] );
+
+            # in case of error msg
+            if ($response_code == ERROR_RESPONSE_CODE) {
+                my $decoded_message = RpbErrorResp->decode($response_body);
+                my $errmsg  = $decoded_message->errmsg;
+                my $errcode = $decoded_message->errcode;
+
+                $self->_die_generic_error( "Riak Error (code: $errcode) '$errmsg'",
+                                           $operation_name, $bucket, $key
+                                         );
+            }
+
+            # check if we have what we want
+            $response_code != $expected_code
+              and $self->_die_generic_error(
+                                            "Unexpected Response Code in (got: $response_code, expected: $expected_code)",
+                                            $operation_name, $bucket, $key
+                                           );
+
+            # default value if we don't need to handle the response.
+            my ($ret, $more_to_come) = ( \1, undef);
+
+            # remember, $handle_response may or may not use $user_callback
+            $handle_response
+              and ($ret, $more_to_come) =$handle_response->( $self,
+                                                             $response_body,
+                                                             $bucket,
+                                                             $key,
+                                                             $user_callback,
+                                                             $decode,
+                                                           );
+            # if we expect more to come, re-prepend the handler
+            if ($more_to_come) {
+                $_[0]->unshift_read( chunk => 4, $reader_callback );
+            } else {
+                # ok, single or multiple response are over, remove the lock.
+                # This is done before executing final callback, so that user
+                # can reenqueue a request right away.
+                my $lock = $self->_requests_lock;
+                $lock and (say STDERR "RELEASING LOCK"), $lock->send();
+
+                # If $ret is undef, means everything has been processed and
+                # callback called in $handle_response, nothing left to do.
+                # Otherwise, we have a result, call the callback on it
+                $ret and $main_callback->($ret);
+            }
+            
+          });
+    };
+
+    $self->_handle->push_read( chunk => 4, $reader_callback);
+
+    # we were given a user callback so don't be synchronous, immediately
+    # return.
+    $user_callback
+      and return;
+
+    # no user callback, let's be synchronous
+    my $res = $cv->recv();
+    $res and
+      return $$res;
+
+    # $res was undef, that's an error here
+    $self->_die_generic_error( "internal error: response handler returns undef, but not in user_callback mode",
+                               $operation_name, $bucket, $key );
 }
 
 sub _die_generic_error {
