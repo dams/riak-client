@@ -12,7 +12,7 @@ use Riak::Client;
 use JSON;
 
 
-my @additional_options = ( [ anyevent_mode => 1]);
+my @additional_options = ( [ ], [ anyevent_mode => 1]);
 
 
 plan tests => 6 * scalar(@additional_options);

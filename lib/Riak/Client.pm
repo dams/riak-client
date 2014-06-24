@@ -852,7 +852,7 @@ sub _parse_response_ae {
 
     # if this request can have multiple responses, set the lock.
     $args->{lock_requests}
-      and (say STDERR "TAKING LOCK"), $self->_requests_lock(AE::cv);
+      and $self->_requests_lock(AE::cv);
 
     my $operation_name = $args->{operation_name};
 
@@ -928,7 +928,7 @@ sub _parse_response_ae {
                 # This is done before executing final callback, so that user
                 # can reenqueue a request right away.
                 my $lock = $self->_requests_lock;
-                $lock and (say STDERR "RELEASING LOCK"), $lock->send();
+                $lock and $lock->send();
 
                 # If $ret is undef, means everything has been processed and
                 # callback called in $handle_response, nothing left to do.
