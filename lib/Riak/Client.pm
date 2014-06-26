@@ -215,7 +215,9 @@ sub BUILD {
   my $client->connect();
 
   # or in AnyEvent mode
-  my $cv = $client->connect();
+  $cv = AE::cv;
+  $client->connect(sub { print "connected!\n"; $cv->send(); });
+  $cv->recv();
 
 Connects to the Riak server. This is automatically done when C<new()> is
 called, unless the C<no_auto_connect> attribute is set to true. In AnyEvent
@@ -228,7 +230,7 @@ sub connect {
 
     if ($self->ae) {
         $self->_handle();
-        if (my $cb = ref $_[-1] eq 'CODE' ? pop : undef) {
+        if (my $cb = ref $_[-1] eq 'CODE' ? $_[-1] : undef) {
             $self->_cv_connected->cb($cb);
             return;
         } else {
@@ -546,17 +548,17 @@ stored in the bucket/key.
 sub exists {
     state $check = compile(Any, Str, Str);
     my ( $self, $bucket, $key ) = $check->(@_);
-    defined $self->_fetch( $bucket, $key, 0, 1 );
+    $self->_fetch( $bucket, $key, 0, 1 );
 }
 
 sub _fetch {
-    my ( $self, $bucket, $key, $decode, $head ) = @_;
+    my ( $self, $bucket, $key, $decode, $test_exist ) = @_;
 
     my $body = RpbGetReq->encode(
         {   r      => $self->r,
             key    => $key,
             bucket => $bucket,
-            head   => $head
+            head   => $test_exist
         }
     );
 
@@ -569,6 +571,7 @@ sub _fetch {
         body_ref  => \$body,
         decode    => $decode,
         handle_response => \&_handle_get_response,
+        test_exist => $test_exist,
     } );
 }
 
@@ -584,6 +587,10 @@ sub _handle_get_response {
     # empty content
     ref $content eq 'ARRAY'
       or return \undef;
+
+    # if we just need to test existence
+    $args->{test_exist}
+      and return \1;
 
     # TODO: handle metadata
     my $value        = $content->[0]->value;
