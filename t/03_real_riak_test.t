@@ -12,7 +12,9 @@ use Riak::Client;
 use JSON;
 
 
-my @additional_options = ( [ ], [ anyevent_mode => 1]);
+my @additional_options = ( [],
+                           [ anyevent_mode => 1]
+                         );
 
 
 plan tests => 6 * scalar(@additional_options);
@@ -98,7 +100,7 @@ subtest "get keys" => sub {
     );
 
     my @keys;
-    $client->get_keys( $bucket => sub { print STDERR " CALLBACK CALLED\n"; push @keys, $_[0] } );
+    $client->get_keys( $bucket => sub { push @keys, $_[0] } );
 
     foreach my $key (@keys) {
         $client->del( $bucket => $key );

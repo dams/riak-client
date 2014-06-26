@@ -767,28 +767,15 @@ sub _parse_response {
     $self->ae
       and goto &_parse_response_ae;
 
-    my $operation_name = $args->{operation_name};
-
-    my $request_code  = $args->{request_code};
-    my $expected_code = $args->{expected_code};
-
-    my $body_ref     = $args->{body_ref};
-    my $decode       = $args->{decode};
-    my $bucket       = $args->{bucket};
-    my $key          = $args->{key};
-    my $callback     = $args->{callback};
-
     my $handle_response = $args->{handle_response};
     
-    $body_ref //= \'';
-
-    $self->_send_bytes($request_code, $body_ref);
+    $self->_send_bytes($args->{request_code}, $args->{body_ref} // \'');
 
     while (1) {
         my $response;
         # get and check response
         my $raw_response_ref = $self->read_response()
-          or $self->_die_generic_error( $! || "Socket Closed", $operation_name, $bucket, $key );
+          or $self->_die_generic_error( $! || "Socket Closed", $args->{operation_name}, $args->{bucket}, $args->{key} );
 
         my ( $response_code, $response_body ) = unpack( 'c a*', $$raw_response_ref );
 
@@ -799,35 +786,41 @@ sub _parse_response {
             my $errcode = $decoded_message->errcode;
 
             $self->_die_generic_error( "Riak Error (code: $errcode) '$errmsg'",
-                                       $operation_name, $bucket, $key
+                                       $args->{operation_name}, $args->{bucket}, $args->{key}
                                      );
         }
 
 
         # check if we have what we want
-        $response_code != $expected_code
+        $response_code != $args->{expected_code}
           and $self->_die_generic_error(
-              "Unexpected Response Code in (got: $response_code, expected: $expected_code)",
-              $operation_name, $bucket, $key
+              "Unexpected Response Code in (got: $response_code, expected: $args->{expected_code})",
+              $args->{operation_name}, $args->{bucket}, $args->{key}
           );
     
-        # if we don't need to handle the response, return success
-        $handle_response
-          or return 1;
+        # default value if we don't need to handle the response.
+        my ($ret, $more_to_come) = ( \1, undef);
 
         # handle the response.
-        my $ret;
-        $ret = $handle_response->(
-                                  $self,
-                                  $response_body,
-                                  $bucket,
-                                  $key,
-                                  $callback,
-                                  $decode )
-          # If ret is undef, means we need to get more data
-          or next;
+        $handle_response
+          and ($ret, $more_to_come) = $handle_response->( $self,
+                                                          $response_body,
+                                                          $args->{bucket},
+                                                          $args->{key},
+                                                          $args->{callback},
+                                                          $args->{decode},
+                                                        );
 
-        return $$ret;
+        # it's a multiple response request, loop again
+        $more_to_come
+          and next;
+
+        # there is a result, return it
+        $ret and
+          return $$ret;
+
+        # ret was undef, means we have processed everything in the callback
+        return;
 
     }
 }
@@ -854,36 +847,22 @@ sub _parse_response_ae {
     $args->{lock_requests}
       and $self->_requests_lock(AE::cv);
 
-    my $operation_name = $args->{operation_name};
-
-    my $request_code  = $args->{request_code};
-    my $expected_code = $args->{expected_code};
-
-    my $body_ref     = $args->{body_ref};
-    my $decode       = $args->{decode};
-    my $bucket       = $args->{bucket};
-    my $key          = $args->{key};
-    my $user_callback     = $args->{callback};
-
-    my $handle_response = $args->{handle_response};
+    my $body_ref     = $args->{body_ref} // \'';
     
-    $body_ref //= \'';
-
-    $self->_handle->push_write(pack('N', bytes::length($$body_ref) + 1) . pack('c', $request_code) . $$body_ref);
+    $self->_handle->push_write(pack('N',
+          bytes::length($$body_ref) + 1)
+        . pack('c', $args->{request_code}) . $$body_ref
+    );
 
     # maybe we'll use a cv to force synchronous call
     my $cv;
-
-    my $main_callback;
-    if ($user_callback) {
-        $main_callback = sub { $user_callback->(${$_[0]}); }
-    } else {
-        $cv = AE::cv;
-        $main_callback = sub { $cv->send($_[0]); }
-    }
+    # if we don't have a user callback, we need to be synchronous, create the cv.
+    $args->{callback}
+      or $cv = AE::cv;
 
     my $reader_callback;
     $reader_callback = sub {
+
         # length arrived, decode
         my $len = unpack "N", $_[1];
         # now read the payload
@@ -897,54 +876,56 @@ sub _parse_response_ae {
                 my $errcode = $decoded_message->errcode;
 
                 $self->_die_generic_error( "Riak Error (code: $errcode) '$errmsg'",
-                                           $operation_name, $bucket, $key
+                                           $args->{operation_name}, $args->{bucket}, $args->{key}
                                          );
             }
 
             # check if we have what we want
-            $response_code != $expected_code
+            $response_code != $args->{expected_code}
               and $self->_die_generic_error(
-                                            "Unexpected Response Code in (got: $response_code, expected: $expected_code)",
-                                            $operation_name, $bucket, $key
+                                            "Unexpected Response Code in (got: $response_code, expected: $args->{expected_code})",
+                                            $args->{operation_name}, $args->{bucket}, $args->{key}
                                            );
 
             # default value if we don't need to handle the response.
             my ($ret, $more_to_come) = ( \1, undef);
-
-            # remember, $handle_response may or may not use $user_callback
-            $handle_response
-              and ($ret, $more_to_come) =$handle_response->( $self,
-                                                             $response_body,
-                                                             $bucket,
-                                                             $key,
-                                                             $user_callback,
-                                                             $decode,
-                                                           );
-            # if we expect more to come, re-prepend the handler
-            if ($more_to_come) {
-                $_[0]->unshift_read( chunk => 4, $reader_callback );
-            } else {
-                # ok, single or multiple response are over, remove the lock.
-                # This is done before executing final callback, so that user
-                # can reenqueue a request right away.
-                my $lock = $self->_requests_lock;
-                $lock and $lock->send();
-
-                # If $ret is undef, means everything has been processed and
-                # callback called in $handle_response, nothing left to do.
-                # Otherwise, we have a result, call the callback on it
-                $ret and $main_callback->($ret);
+            # remember, $handle_response may or may not use $args->{user_callback}
+            if (my $handle_response = $args->{handle_response}) {
+                ($ret, $more_to_come) = $handle_response->( $self,
+                                                            $response_body,
+                                                            $args->{bucket},
+                                                            $args->{key},
+                                                            $args->{callback},
+                                                            $args->{decode},
+                                                          );
             }
+            # if we expect more to come, re-prepend the handler
+            $more_to_come and $_[0]->unshift_read( chunk => 4, $reader_callback ),
+                              return;
+
+            # ok, single or multiple response are over, remove the lock.
+            # This is done before last callback execution, so that user can
+            # re-enqueue a request right away.
+            my $lock = $self->_requests_lock;
+            $lock and $lock->send();
+
+            # if no user callback provided, use the $cv and return.
+            $cv and $cv->send($ret),
+                    return;
+
+            # If $ret is undef, means everything has been processed and
+            # callback called in $handle_response, nothing left to do.
+            # Otherwise, we have a result, call the callback on it
+            $ret and $args->{callback}->($$ret);
             
           });
     };
 
+    # OK, now try to read from the socket with the handler
     $self->_handle->push_read( chunk => 4, $reader_callback);
 
-    # we were given a user callback so don't be synchronous, immediately
-    # return.
-    $user_callback
-      and return;
+    # we were given a user callback, don't be synchronous, immediately return.
+    $cv or return;
 
     # no user callback, let's be synchronous
     my $res = $cv->recv();
@@ -953,7 +934,7 @@ sub _parse_response_ae {
 
     # $res was undef, that's an error here
     $self->_die_generic_error( "internal error: response handler returns undef, but not in user_callback mode",
-                               $operation_name, $bucket, $key );
+                               $args->{operation_name}, $args->{bucket}, $args->{key} );
 }
 
 sub _die_generic_error {
