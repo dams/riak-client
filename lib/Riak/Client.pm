@@ -576,7 +576,7 @@ sub _handle_get_response {
     my ( $self, $encoded_message, $args ) = @_;
 
     defined $encoded_message
-      or $self->_die_generic_error( "Undefined Message", 'get', $args );
+      or _die_generic_error( "Undefined Message", 'get', $args );
 
     my $decoded_message = RpbGetResp->decode($encoded_message);
     my $content = $decoded_message->content;
@@ -766,13 +766,14 @@ sub _parse_response {
     $self->ae
       and goto &_parse_response_ae;
 
-    $self->_send_bytes($args->{request_code}, $args->{body_ref} // \'');
+    my $socket = $self->_socket;
+    _send_bytes($socket, $args->{request_code}, $args->{body_ref} // \'');
 
     while (1) {
         my $response;
         # get and check response
-        my $raw_response_ref = $self->read_response()
-          or $self->_die_generic_error( $! || "Socket Closed", $args);
+        my $raw_response_ref = _read_response($socket)
+          or _die_generic_error( $! || "Socket Closed", $args);
 
         my ( $response_code, $response_body ) = unpack( 'c a*', $$raw_response_ref );
 
@@ -782,13 +783,13 @@ sub _parse_response {
             my $errmsg  = $decoded_message->errmsg;
             my $errcode = $decoded_message->errcode;
 
-            $self->_die_generic_error( "Riak Error (code: $errcode) '$errmsg'", $args);
+            _die_generic_error( "Riak Error (code: $errcode) '$errmsg'", $args);
         }
 
 
         # check if we have what we want
         $response_code != $args->{expected_code}
-          and $self->_die_generic_error(
+          and _die_generic_error(
               "Unexpected Response Code in (got: $response_code, expected: $args->{expected_code})",
               $args );
     
@@ -864,12 +865,12 @@ sub _parse_response_ae {
                 my $errmsg  = $decoded_message->errmsg;
                 my $errcode = $decoded_message->errcode;
 
-                $self->_die_generic_error( "Riak Error (code: $errcode) '$errmsg'", $args );
+                _die_generic_error( "Riak Error (code: $errcode) '$errmsg'", $args );
             }
 
             # check if we have what we want
             $response_code != $args->{expected_code}
-              and $self->_die_generic_error(
+              and _die_generic_error(
                       "Unexpected Response Code in (got: $response_code, expected: $args->{expected_code})",
                       $args );
 
@@ -913,12 +914,12 @@ sub _parse_response_ae {
       return $$res;
 
     # $res was undef, that's an error here
-    $self->_die_generic_error( "internal error: response handler returns <undef>, but not in callback mode",
+    _die_generic_error( "internal error: response handler returns <undef>, but not in callback mode",
                                $args );
 }
 
 sub _die_generic_error {
-    my ( $self, $error, $args ) = @_;
+    my ( $error, $args ) = @_;
 
     my ($operation_name, $bucket, $key) =
       map { $_ // "<unknown $_>" }
@@ -931,18 +932,17 @@ sub _die_generic_error {
     croak "Error in '$operation_name' $extra: $error";
 }
 
-sub read_response {
-    my ($self) = @_;
-    $self->_read_bytes(unpack( 'N', ${ $self->_read_bytes(4) // return } ));
+sub _read_response {
+    my ($socket) = @_;
+    _read_bytes($socket, unpack( 'N', ${ _read_bytes($socket, 4) // return } ));
 }
 
 sub _read_bytes {
-    my ( $self, $length ) = @_;
+    my ( $socket, $length ) = @_;
 
     my $buffer;
     my $offset = 0;
     my $read = 0;
-    my $socket = $self->_socket;
 
     while ($length > 0) {
         $read = $socket->sysread( $buffer, $length, $offset );
@@ -964,14 +964,13 @@ sub _read_bytes {
 
 
 sub _send_bytes {
-    my ( $self, $request_code, $body_ref ) = @_;
+    my ( $socket, $request_code, $body_ref ) = @_;
 
     my $bytes = pack('N', my $length = (bytes::length($$body_ref) + 1)) . pack('c', $request_code) . $$body_ref;
 
     $length += 4;
     my $offset = 0;
     my $sent = 0;
-    my $socket = $self->_socket;
 
     while ($length > 0) {
         $sent = $socket->syswrite( $bytes, $length, $offset );
@@ -1006,3 +1005,5 @@ L<Data::Riak::Fast>
 L<Action::Retry>
 
 L<Riak::Light>
+
+L<AnyEvent>
