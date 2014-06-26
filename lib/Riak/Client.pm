@@ -33,7 +33,7 @@ use Scalar::Util qw(weaken);
     port => 8087
   );
 
-  $client->is_alive() or die "oops, riak is not alive";
+  $client->is_alive() or die "riak is not alive";
 
   # store hashref into bucket 'foo', key 'bar'
   # will serializer as 'application/json'
@@ -203,11 +203,7 @@ sub BUILD {
     $self->no_auto_connect
       and return;
 
-    if ($self->ae) {
-        $self->connect();
-    } else {
-        $self->connect();
-    }
+    $self->connect();
 }
 
 =method connect
@@ -228,19 +224,19 @@ mode, returns a conditional variable,that will be triggered when connected.
 sub connect {
     my ($self) = @_;
 
-    if ($self->ae) {
-        $self->_handle();
-        if (my $cb = ref $_[-1] eq 'CODE' ? $_[-1] : undef) {
-            $self->_cv_connected->cb($cb);
-            return;
-        } else {
-            $self->_cv_connected->recv;
-            return 1;
-        }
+    $self->ae
+      or $self->_socket(),
+         return 1;
+
+    $self->_handle();
+    if (my $cb = ref $_[-1] eq 'CODE' ? $_[-1] : undef) {
+        $self->_cv_connected->cb($cb);
+        return;
     }
 
-    $self->_socket();
+    $self->_cv_connected->recv;
     return 1;
+
 }
 
 has _getkeys_accumulator => (is => 'rw', init_arg => undef);
@@ -287,12 +283,14 @@ Perform a ping operation. Will die in case of error. See C<is_alive()>
 =cut
 
 sub ping {
+    state $check = compile(Any, Optional[CodeRef]);
+    my ( $self, $cb ) = $check->(@_);
     $_[0]->_parse_response( {
         request_code   => PING_REQUEST_CODE,
         expected_code  => PING_RESPONSE_CODE,
         operation_name => 'ping',
         body_ref       => \'',
-        cb             => ref $_[-1] eq 'CODE' ? $_[-1] : undef,
+        cb             => $cb,
     } );
 }
 
@@ -329,9 +327,9 @@ Perl structure. If you need the raw data you can use L<get_raw>.
 =cut
 
 sub get {
-    state $check = compile(Any, Str, Str);
-    my ( $self, $bucket, $key ) = $check->(@_);
-    $self->_fetch( $bucket, $key, 1 );
+    state $check = compile(Any, Str, Str, Optional[CodeRef]);
+    my ( $self, $bucket, $key, $cb ) = $check->(@_);
+    $self->_fetch( $bucket, $key, 1, 0, $cb );
 }
 
 =method get_raw
@@ -344,9 +342,9 @@ If you need decode the json, you should use C<get()> instead.
 =cut
 
 sub get_raw {
-    state $check = compile(Any, Str, Str);
-    my ( $self, $bucket, $key ) = $check->(@_);
-    $self->_fetch( $bucket, $key, 0 );
+    state $check = compile(Any, Str, Str, Optional[CodeRef]);
+    my ( $self, $bucket, $key, $cb ) = $check->(@_);
+    $self->_fetch( $bucket, $key, 0, 0, $cb );
 }
 
 =method put
@@ -378,6 +376,7 @@ To query secondary indexes, see L<query_index>.
 =cut
 
 sub put {
+    my $cb = ref $_[-1] eq 'CODE' ? pop : undef;
     state $check = compile(Any, Str, Str, Any, Optional[Str], Optional[HashRef[Str]]);
     my ( $self, $bucket, $key, $value, $content_type, $indexes ) = $check->(@_);
 
@@ -385,7 +384,7 @@ sub put {
       eq 'application/json'
         and $value = encode_json($value);
 
-    $self->_store( $bucket, $key, $value, $content_type, $indexes);
+    $self->_store( $bucket, $key, $value, $content_type, $indexes, $cb);
 }
 
 
@@ -410,10 +409,11 @@ To query secondary indexes, see L<query_index>.
 =cut
 
 sub put_raw {
+    my $cb = ref $_[-1] eq 'CODE' ? pop : undef;
     state $check = compile(Any, Str, Str, Any, Optional[Str], Optional[HashRef[Str]]);
     my ( $self, $bucket, $key, $value, $content_type, $indexes ) = $check->(@_);
     $content_type ||= 'plain/text';
-    $self->_store( $bucket, $key, $value, $content_type, $indexes);
+    $self->_store( $bucket, $key, $value, $content_type, $indexes, $cb);
 }
 
 =method del
@@ -425,8 +425,8 @@ Perform a delete operation. Expects bucket and key names.
 =cut
 
 sub del {
-    state $check = compile(Any, Str, Str);
-    my ( $self, $bucket, $key ) = $check->(@_);
+    state $check = compile(Any, Str, Str, Optional[CodeRef]);
+    my ( $self, $bucket, $key, $cb ) = $check->(@_);
 
     my $body = RpbDelReq->encode(
         {   key    => $key,
@@ -546,8 +546,8 @@ stored in the bucket/key.
 =cut
 
 sub exists {
-    state $check = compile(Any, Str, Str);
-    my ( $self, $bucket, $key ) = $check->(@_);
+    state $check = compile(Any, Str, Str, Optional[CodeRef]);
+    my ( $self, $bucket, $key, $cb ) = $check->(@_);
     $self->_fetch( $bucket, $key, 0, 1 );
 }
 
@@ -714,14 +714,15 @@ sub _handle_query_index_response {
 }
 
 sub get_buckets {
-    state $check = compile(Any);
-    my ( $self ) = $check->(@_);
+    state $check = compile(Any, Optional[CodeRef]);
+    my ( $self, $cb ) = $check->(@_);
 
     $self->_parse_response( {
         request_code    => GET_BUCKETS_REQUEST_CODE,
         expected_code   => GET_BUCKETS_RESPONSE_CODE,
-        operation_name => 'get_buckets',
+        operation_name  => 'get_buckets',
         handle_response => \&_handle_get_buckets_response,
+        cb              => $cb,
     } );
 }
 
@@ -732,8 +733,8 @@ sub _handle_get_buckets_response {
 }
 
 sub get_bucket_props {
-    state $check = compile(Any, Str);
-    my ( $self, $bucket ) = $check->(@_);
+    state $check = compile(Any, Str, Optional[CodeRef]);
+    my ( $self, $bucket, $cb ) = $check->(@_);
 
     my $body = RpbGetBucketReq->encode( { bucket => $bucket } );
     $self->_parse_response( {
@@ -742,6 +743,7 @@ sub get_bucket_props {
         bucket          => $bucket,
         body_ref        => \$body,
         handle_response => \&_handle_get_bucket_props_response,
+        cb              => $cb,
     } );
 }
 
@@ -754,8 +756,11 @@ sub _handle_get_bucket_props_response {
 }
 
 sub set_bucket_props {
-    state $check = compile(Any, Str, Dict[ n_val => Optional[Int], allow_mult => Optional[Bool] ]);
-    my ( $self, $bucket, $props ) = $check->(@_);
+    state $check = compile( Any, Str, 
+                            Dict[ n_val => Optional[Int],
+                                  allow_mult => Optional[Bool] ],
+                            Optional[CodeRef] );
+    my ( $self, $bucket, $props, $cb ) = $check->(@_);
     $props->{n_val} && $props->{n_val} < 0 and croak 'n_val should be possitive integer';
 
     my $body = RpbSetBucketReq->encode({ bucket => $bucket, props => $props });
