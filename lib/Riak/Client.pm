@@ -303,7 +303,11 @@ Perform a ping operation. Will return false in case of error (which will be stor
 =cut
 
 sub is_alive {
-    eval { $_[0]->ping };
+    state $check = compile(Any, Optional[CodeRef]);
+    my ( $self, $cb ) = $check->(@_);
+    my $res = eval { $self->ping; 1 };
+    $cb and return $cb->($res);
+    return $res;
 }
 
 =method get
@@ -442,6 +446,7 @@ sub del {
         key            => $key,
         bucket         => $bucket,
         body_ref       => \$body,
+        cb             => $cb,
     } );
 }
 
@@ -548,11 +553,11 @@ stored in the bucket/key.
 sub exists {
     state $check = compile(Any, Str, Str, Optional[CodeRef]);
     my ( $self, $bucket, $key, $cb ) = $check->(@_);
-    $self->_fetch( $bucket, $key, 0, 1 );
+    $self->_fetch( $bucket, $key, 0, 1, $cb );
 }
 
 sub _fetch {
-    my ( $self, $bucket, $key, $decode, $test_exist ) = @_;
+    my ( $self, $bucket, $key, $decode, $test_exist, $cb ) = @_;
 
     my $body = RpbGetReq->encode(
         {   r      => $self->r,
@@ -572,6 +577,7 @@ sub _fetch {
         decode    => $decode,
         handle_response => \&_handle_get_response,
         test_exist => $test_exist,
+        cb => $cb,
     } );
 }
 
@@ -605,7 +611,7 @@ sub _handle_get_response {
 }
 
 sub _store {
-    my ( $self, $bucket, $key, $encoded_value, $content_type, $indexes ) = @_;
+    my ( $self, $bucket, $key, $encoded_value, $content_type, $indexes, $cb ) = @_;
 
     my $body = RpbPutReq->encode(
         {   key     => $key,
@@ -631,6 +637,7 @@ sub _store {
         key            => $key,
         bucket         => $bucket,
         body_ref       => \$body,
+        cb             => $cb,
     } );
 }
 
@@ -817,9 +824,11 @@ sub _parse_response {
         $more_to_come
           and next;
 
-        # there is a result, return it
-        $ret and
-          return $$ret;
+        # there is a result, process or return it
+        if ($ret) {
+            $args->{cb} and return $args->{cb}->($$ret);
+            return $$ret;
+        }
 
         # ret was undef, means we have processed everything in the callback
         return;

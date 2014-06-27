@@ -1,3 +1,5 @@
+use strict;
+use warnings;
 BEGIN {
     unless ( $ENV{RIAK_PBC_HOST} ) {
         require Test::More;
@@ -12,27 +14,31 @@ use Riak::Client;
 use JSON;
 
 
-my @additional_options = ( [],
-                           [ anyevent_mode => 1]
-                         );
-
-
-plan tests => 6 * scalar(@additional_options);
+my %modes = (
+             'standard nocb' => [ 0 ],
+             'standard cb' => [ 1 ],
+             'AE nocb'  => [ 0, anyevent_mode => 1 ],
+             'AE cb' => [ 0, anyevent_mode => 1 ],
+           );
+plan tests => 6 * scalar(keys %modes);
 
 my ( $host, $port ) = split ':', $ENV{RIAK_PBC_HOST};
-
 my @buckets_to_cleanup = ( qw(foo) );
 
-foreach my $additional_options ( @additional_options ) {
+
+foreach my $mode ( keys %modes ) {
+
+my ($cb, @additional_options) = @{$modes{$mode}};
 
 diag "";
 diag "";
-diag($additional_options->[0] // 'no additional option');
+diag "MODE: $mode";
 diag "";
+
 subtest "connection" => sub {
     plan tests => 2;
     my $client = Riak::Client->new(
-        @$additional_options,
+        @additional_options,
         host => $host,
         port => $port,
         no_auto_connect => 1,
@@ -47,33 +53,34 @@ subtest "simple get/set/delete test" => sub {
     my ( $host, $port ) = split ':', $ENV{RIAK_PBC_HOST};
 
     my $client = Riak::Client->new(
-        @$additional_options,
+        @additional_options,
         host => $host, port => $port,
     );
 
     my $scalar = '3.14159';
     my $hash = { baz => 1024 };
 
-    ok( $client->ping(),     "can ping" );
-    ok( $client->is_alive(), "is_alive" );
-    ok( $client->put( foo => "bar", $hash ),
-        "should store the hashref in Riak"
-    );
-    is_deeply(
-        $client->get( foo => 'bar' ), $hash,
-        "should fetch the stored hashref from Riak"
-    );
+    # make sure we run stuff with callbacks as well
+    
+    $cb ?         $client->ping(                            sub { ok($_[0],               "can ping" ) } )
+      : ok(       $client->ping(),                                                        "can ping" );
+    $cb ?         $client->is_alive(                        sub { ok($_[0],               "is_alive" ) } )
+      : ok(       $client->is_alive(),                                                    "is_alive" );
+    $cb ?         $client->put(     foo => "bar", $hash,    sub { ok($_[0],               "store hashref" ) } )
+      : ok(       $client->put(     foo => "bar", $hash ),                                "store hashref" );
+    $cb ?         $client->get(     foo => 'bar',           sub { is_deeply($_[0], $hash, "fetch hashref" ) } )
+      : is_deeply($client->get(     foo => 'bar' ), $hash,                                "fetch hashref" );
+    $cb ?         $client->put_raw( foo => "bar2", $scalar, sub { ok($_[0],               "store raw scalar") } )
+      : ok(       $client->put_raw( foo => "bar2", $scalar ),                             "store raw scalar");
+    $cb ?         $client->get_raw( foo => 'bar2',          sub { is($_[0], $scalar,      "fetch raw scalar") } )
+      : is(       $client->get_raw( foo => 'bar2' ), $scalar,                             "fetch raw scalar");
+    $cb ?         $client->exists(  foo => 'bar',           sub { ok($_[0],               "should exists" ) } )
+      : ok(       $client->exists(  foo => 'bar' ),                                       "should exists" );
+    $cb ?         $client->del(     foo => 'bar',           sub { ok($_[0],               "delete hashref" ) } )
+      : ok(       $client->del(     foo => 'bar' ),                                       "delete hashref" );
+    $cb ?         $client->get(     foo => 'bar',           sub { ok(! $_[0],             "fetches nothing" ) } )
+      : ok(      !$client->get(     foo => 'bar' ),                                       "fetches nothing" );
 
-    ok( $client->put_raw( foo => "bar2", $scalar ),
-        "should store the raw scalar in Riak"
-    );
-    is( $client->get_raw( foo => 'bar2' ), $scalar,
-        "should fetch the raw scalar from Riak"
-    );
-
-    ok( $client->exists( foo => 'bar' ), "should exists" );
-    ok( $client->del( foo => 'bar' ), "should delete the hashref" );
-    ok( !$client->get( foo => 'bar' ), "should fetch UNDEF from Riak" );
     ok( !$client->exists( foo => 'bar' ), "should not exists" );
 
     ok( $client->put( foo => "baz", 'TEXT', 'plain/text' ),
@@ -95,7 +102,7 @@ subtest "get keys" => sub {
     my ( $host, $port ) = split ':', $ENV{RIAK_PBC_HOST};
 
     my $client = Riak::Client->new(
-        @$additional_options,
+        @additional_options,
         host => $host, port => $port,
     );
 
@@ -123,13 +130,14 @@ subtest "get keys" => sub {
     is( $keys[2],     'baz' );
 };
 
-subtest "sequence of 1024 get/set" => sub {
-    plan tests => 1024;
+my $nb = 10;
+subtest "sequence of $nb get/set" => sub {
+    plan tests => $nb;
 
     my ( $host, $port ) = split ':', $ENV{RIAK_PBC_HOST};
 
     my $client = Riak::Client->new(
-        @$additional_options,
+        @additional_options,
         host => $host, port => $port,
     );
 
@@ -139,7 +147,7 @@ subtest "sequence of 1024 get/set" => sub {
     };
 
     my ( $bucket, $key );
-    for ( 1 .. 1024 ) {
+    for ( 1 .. $nb ) {
         ( $bucket, $key ) =
           ( "bucket" . int( rand(1024) ), "key" . int( rand(1024) ) );
 
@@ -163,7 +171,7 @@ subtest "get buckets" => sub {
     my ( $host, $port ) = split ':', $ENV{RIAK_PBC_HOST};
 
     my $client = Riak::Client->new(
-        @$additional_options,
+        @additional_options,
         host => $host, port => $port,
     );
 
@@ -185,13 +193,8 @@ subtest "get buckets" => sub {
     is( scalar @buckets, scalar @exp_buckets );
 
     foreach my $bucket (@new_buckets) {
-        is(grep( $bucket eq $_, @buckets), 1, "bucket $bucket is not found");
+        is(grep( $bucket eq $_, @buckets), 1, "bucket $bucket is found");
     }
-
-    my $another_client = Riak::Client->new(
-        @$additional_options,
-        host => $host, port => $port,
-    );
 
 };
 
@@ -201,7 +204,7 @@ subtest "get/set buckets props" => sub {
     my ( $host, $port ) = split ':', $ENV{RIAK_PBC_HOST};
 
     my $client = Riak::Client->new(
-        @$additional_options,
+        @additional_options,
         host => $host, port => $port,
     );
 
@@ -233,20 +236,22 @@ END {
 
     diag "cleaning up...";
     my $client = Riak::Client->new(
-        @$additional_options,
+        host => $host, port => $port,
+    );
+    my $another_client = Riak::Client->new(
         host => $host, port => $port,
     );
 
-    foreach my $bucket (@new_buckets) {
+    my $c = 0;
+    foreach my $bucket (@buckets_to_cleanup) {
         $client->get_keys($bucket => sub{
                               my $key = $_; # also in $_[0]
-
-                              # you should use another client inside this callback!
-                              print "$bucket - $key\n";
+                              # { local $| = 1; print "."; }
+                              $c++;
                               $another_client->del($bucket => $key);
                           });
     }
 
-    diag "done.";
+    diag "done (deleted $c keys).";
 
 }
