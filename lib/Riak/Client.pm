@@ -27,7 +27,6 @@ use Scalar::Util qw(weaken);
 
   use Riak::Client;
 
-  # create a new instance - using pbc only
   my $client = Riak::Client->new(
     host => '127.0.0.1',
     port => 8087
@@ -35,16 +34,19 @@ use Scalar::Util qw(weaken);
 
   $client->is_alive() or die "riak is not alive";
 
-  # store hashref into bucket 'foo', key 'bar'
-  # will serializer as 'application/json'
-  $client->put( foo => bar => { baz => 1024 });
+  # store hashref. will be serialized as JSON
+  $client->put( 'bucket_name', 'key_name', { some => 'structure' } );
 
-  # store text into bucket 'foo', key 'bar' 
-  $client->put( foo => baz => "sometext", 'text/plain');
-  $client->put_raw( foo => baz => "sometext");  # does not encode !
+  # store text
+  $client->put( 'bucket_name', 'key_name', 'sometext', 'text/plain' );
 
-  # fetch hashref from bucket 'foo', key 'bar'
-  my $hash = $client->get( foo => 'bar');
+  # store raw data
+  $client->put_raw( 'bucket_name', 'key_name', 'rawdata' );
+
+  # fetch hashref
+  my $hash = $client->get( 'bucket_name', 'key_name' );
+
+  # fetch raw data
   my $text = $client->get_raw( foo => 'baz');   # does not decode !
 
   # delete hashref from bucket 'foo', key 'bar'
@@ -152,6 +154,7 @@ sub _build__handle {
     # TODO = timeouts
     $handle = AnyEvent::Handle->new (
       connect  => [$host, $port],
+      no_delay => 1,
       on_error => sub {
          $handle->destroy; # explicitly destroy handle
          my $command = $self->{_req_command} // "<unknown>";
@@ -165,7 +168,6 @@ sub _build__handle {
       on_connect => sub { $self->_cv_connected->send },
 #      on_timeout => sub { print STDERR " ---- PLOP \n";},
     );
-
 }
 
 has _socket => ( is => 'ro', lazy => 1, builder => 1 );
@@ -194,6 +196,9 @@ sub _build__socket {
       and $socket->read_timeout($self->read_timeout);
     $self->has_write_timeout
       and $socket->write_timeout($self->write_timeout);
+
+    use Socket qw(IPPROTO_TCP TCP_NODELAY);
+    $socket->setsockopt(IPPROTO_TCP, TCP_NODELAY, 1);
 
     return $socket;
 }

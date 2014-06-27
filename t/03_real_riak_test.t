@@ -14,21 +14,21 @@ use Riak::Client;
 use JSON;
 
 
-my %modes = (
-             'standard nocb' => [ 0 ],
-             'standard cb' => [ 1 ],
-             'AE nocb'  => [ 0, anyevent_mode => 1 ],
-             'AE cb' => [ 0, anyevent_mode => 1 ],
+my @modes = (
+             [ 'standard nocb', 0 ],
+             [ 'standard cb', 1 ],
+             [ 'AE nocb', 0, anyevent_mode => 1 ],
+             [ 'AE cb', 0, anyevent_mode => 1 ],
            );
-plan tests => 6 * scalar(keys %modes);
+plan tests => 6 * scalar(@modes);
 
 my ( $host, $port ) = split ':', $ENV{RIAK_PBC_HOST};
 my @buckets_to_cleanup = ( qw(foo) );
 
 
-foreach my $mode ( keys %modes ) {
+foreach ( @modes ) {
 
-my ($cb, @additional_options) = @{$modes{$mode}};
+my ($mode, $cb, @additional_options) = @$_;
 
 diag "";
 diag "";
