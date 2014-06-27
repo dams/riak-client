@@ -27,9 +27,24 @@ use Scalar::Util qw(weaken);
 
   use Riak::Client;
 
+  # normal mode
+  my $client = Riak::Client->new(
+    host => '127.0.0.1',
+    port => 8087,
+    r => 2,
+    w => 2,
+    dw => 1,
+    connection_timeout => 5,
+    read_timeout => 5,
+    write_timeout => 5,
+    no_auto_connect => 0,
+  );
+
+  # AnyEvent mode
   my $client = Riak::Client->new(
     host => '127.0.0.1',
     port => 8087
+    anyevent_mode => 1,
   );
 
   $client->is_alive() or die "riak is not alive";
@@ -47,13 +62,20 @@ use Scalar::Util qw(weaken);
   my $hash = $client->get( 'bucket_name', 'key_name' );
 
   # fetch raw data
-  my $text = $client->get_raw( foo => 'baz');   # does not decode !
+  my $text = $client->get_raw( 'bucket_name', 'key_name');
 
-  # delete hashref from bucket 'foo', key 'bar'
-  $client->del(foo => 'bar');
+  # delete data
+  $client->del( 'bucket_name', 'key_name');
 
-  # check if exists (like get but using less bytes in the response)
-  $client->exists(foo => 'baz') or warn "oops, foo/bar does not exist";
+  # AnyEvent mode
+  my $cv = AE::cv
+  $client->get_raw( 'bucket_name', 'key_name'
+                    sub { do_something_with($_[0]);
+                          $cv->send();
+                    }
+              );
+  # ... later one
+  $cv->recv();
 
   # list keys in stream
   $client->get_keys(foo => sub{
@@ -66,47 +88,53 @@ use Scalar::Util qw(weaken);
   
 =head1 DESCRIPTION
 
-Riak::Client is a fast and light Perl client for Riak using PBC interface.
+Riak::Client is a fast and light Perl client for Riak using PBC interface, with
+optional AnyEvent mode.
+
 It supports operations like ping, get, exists, put, del, and secondary indexes
 (so-called 2i) setting and querying.
 
 It has two modes, a traditional procedural mode, and an event based mode, using
 AnyEvent.
 
-It started as a for of Riak::Light to fix some bugs, but actually ended up in a
-complete rewrite with more features, but the same performance
+It started as a fork of C<Riak::Light> to fix some bugs, but actually ended up
+in a complete rewrite with more features, but the same performance.
+
+=attr anyevent_mode
+
+Enables the AnyEvent mode, allowing true asynchronous mode. See below L<ANYEVENT MODE>.
 
 =attr host
 
-Riak IP or hostname. Str, Required.
+Str, Required. Riak IP or hostname.
 
 =attr port
 
-Port of the PBC interface. Int, Required.
+Int, Required. Port of the PBC interface.
 
 =attr r
 
-R value setting for this client. Int, Default 2.
+Int, Default 2. R value setting for this client.
 
 =attr w
 
-W value setting for this client. Int, Default 2.
+Int, Default 2. W value setting for this client.
 
 =attr dw
 
-DW value setting for this client. Int, Default 1.
+Int, Default 1. DW value setting for this client.
 
 =attr connection_timeout
 
-Timeout for connection operation, in seconds. Set to 0 for no timeout. Float, Defaults to 5
+Float, Default 5. Timeout for connection operation, in seconds. Set to 0 for no timeout.
 
 =attr read_timeout
 
-Timeout for read operation, in seconds. Set to 0 for no timeout. Float, Defaults to 5
+Float, Default 5. Timeout for read operation, in seconds. Set to 0 for no timeout.
 
 =attr write_timeout
 
-Timeout for write operation, in seconds. Set to 0 for no timeout. Float, Defaults to 5
+Float, Default 5. Timeout for write operation, in seconds. Set to 0 for no timeout.
 
 =cut
 
@@ -121,8 +149,8 @@ has write_timeout      => ( is => 'ro', predicate => 1, isa => Num,  default  =>
 
 =attr no_auto_connect
 
-If set to true, then the module won't automatically connect upon instanciation.
-Instead, you'll have to call C<connect()> yoruself. Boolean, Defaults to 0
+Bool, Default 0. If set to true, then the module won't automatically connect upon instanciation.
+Instead, you'll have to call C<connect()> yourself.
 
 =cut
 
@@ -130,7 +158,7 @@ has no_auto_connect => ( is => 'ro', isa => Bool,  default  => sub {0} );
 
 =attr anyevent_mode
 
-Bool, Defaults to 0. If set to true, then all methods can receive a callback,
+Bool, Default 0. If set to true, then all methods can receive a callback,
 as last argument. If present, the method will return immediately, and the
 callback will be executed upon completion of the operation, receiving a condvar
 as first and only argument. If set to false (the default), then the client
@@ -455,14 +483,11 @@ sub del {
     } );
 }
 
-=method my $keys = get_keys($bucket)
+=method get_keys
 
-=method get_keys($bucket, $cb->($key, $done) )
-
-  # in synchronous mode
+  # in default mode
   $client->get_keys(foo => sub{
      my ($key, $done) = @_;
-
      # you should use another client inside this callback!
      $another_client->del(foo => $key);
   });
@@ -471,12 +496,20 @@ sub del {
   my $cv = AE::cv;
   $client->get_keys(foo => sub{
      my ($key, $done) = @_;
+     # ... do stuff with $key
      $done and $cv->send;
   });
   $cv->recv();
 
+B<WARNING>, this method should not be called on a production Riak cluster, as
+it can have a big performance impact. See Riak's documentation.
+
+B<WARNING>, because Riak doesn't handles pipelining, you cannot use the same
+C<Riak::Client> instance inside the callback, it would raise an exception.
+
 Perform a list keys operation. Receive a callback and will call it for each
-key. the key is also in C<$_>.
+key. The callback will receive two arguments: the key, and a boolean indicating
+if it's the last key
 
 The callback is optional, in which case an ArrayRef of B<all> the keys are
 returned. But don't do that, and always provide a callback, to avoid your RAM
@@ -533,14 +566,14 @@ sub _handle_get_keys_response {
       and $last_key = pop @keys;
 
     # second arg = more to come
-    $cb->($_, 1) foreach @keys;
+    $cb->($_) foreach @keys;
 
     # if more to come, return by saying so
     $obj->done
       or return (undef, 1);
 
     # process last keys if any
-    defined $last_key and $cb->($last_key);
+    defined $last_key and $cb->($last_key, 1);
 
     # means: nothing left to do, all results processed through callback
     return;
@@ -691,7 +724,7 @@ sub query_index {
             : (key => $value_to_match ),
         }
     );
-
+    
     $self->_parse_response( {
         request_code   => QUERY_INDEX_REQUEST_CODE,
         expected_code  => QUERY_INDEX_RESPONSE_CODE,
@@ -1019,6 +1052,10 @@ sub _send_bytes {
 
 
 1;
+
+=head1 CONTRIBUTORS
+
+Ivan Kruglov <ivan.kruglov@yahoo.com>
 
 =head1 SEE ALSO
 
