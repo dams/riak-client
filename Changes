@@ -1,5 +1,11 @@
 {{$NEXT}}
 
+   * complete rewrite from scratch
+   * AnyEvent mode
+   * callback mode
+   * supports Map Reduce
+   * bugfixes, documentation, tests
+
 0.11      2013-11-21 14:16:06 Europe/Amsterdam
    * fix networking code issues (handle EINTR and fix bug) (ivan)
    * implements get_buckets + (get|set)_bucket_props (ivan)
