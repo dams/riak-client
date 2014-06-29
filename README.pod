@@ -1,0 +1,320 @@
+NAME
+    Riak::Client - Fast and lightweight Perl client for Riak
+
+VERSION
+    version 1.91
+
+SYNOPSIS
+      use Riak::Client;
+
+      # normal mode
+      my $client = Riak::Client->new(
+        host => '127.0.0.1',
+        port => 8087,
+        r => 2,
+        w => 2,
+        dw => 1,
+        connection_timeout => 5,
+        read_timeout => 5,
+        write_timeout => 5,
+        no_auto_connect => 0,
+      );
+
+      # AnyEvent mode
+      my $client = Riak::Client->new(
+        host => '127.0.0.1',
+        port => 8087
+        anyevent_mode => 1,
+      );
+
+      $client->is_alive() or die "riak is not alive";
+
+      # store hashref. will be serialized as JSON
+      $client->put( 'bucket_name', 'key_name', { some => 'structure' } );
+
+      # store text
+      $client->put( 'bucket_name', 'key_name', 'sometext', 'text/plain' );
+
+      # store raw data
+      $client->put_raw( 'bucket_name', 'key_name', 'rawdata' );
+
+      # fetch hashref
+      my $hash = $client->get( 'bucket_name', 'key_name' );
+
+      # fetch raw data
+      my $text = $client->get_raw( 'bucket_name', 'key_name');
+
+      # delete data
+      $client->del( 'bucket_name', 'key_name');
+
+      # AnyEvent mode
+      my $cv = AE::cv
+      $client->get_raw( 'bucket_name', 'key_name'
+                        sub { do_something_with($_[0]);
+                              $cv->send();
+                        }
+                  );
+      # ... later one
+      $cv->recv();
+
+      # list keys in stream
+      $client->get_keys(foo => sub{
+         my ($key, $done) = @_;
+
+         # you should use another client inside this callback!
+         $another_client->del(foo => $key);
+
+      });
+
+DESCRIPTION
+    Riak::Client is a fast and light Perl client for Riak using PBC
+    interface, with optional AnyEvent mode.
+
+    It supports operations like ping, get, exists, put, del, and secondary
+    indexes (so-called 2i) setting and querying.
+
+    It has two modes, a traditional procedural mode, and an event based
+    mode, using AnyEvent.
+
+    It started as a fork of "Riak::Light" to fix some bugs, but actually
+    ended up in a complete rewrite with more features, but the same
+    performance.
+
+ATTRIBUTES
+  anyevent_mode
+    Enables the AnyEvent mode, allowing true asynchronous mode.
+
+  host
+    Str, Required. Riak IP or hostname.
+
+  port
+    Int, Required. Port of the PBC interface.
+
+  r
+    Int, Default 2. R value setting for this client.
+
+  w
+    Int, Default 2. W value setting for this client.
+
+  dw
+    Int, Default 1. DW value setting for this client.
+
+  connection_timeout
+    Float, Default 5. Timeout for connection operation, in seconds. Set to 0
+    for no timeout.
+
+  read_timeout
+    Float, Default 5. Timeout for read operation, in seconds. Set to 0 for
+    no timeout.
+
+  write_timeout
+    Float, Default 5. Timeout for write operation, in seconds. Set to 0 for
+    no timeout.
+
+  no_auto_connect
+    Bool, Default 0. If set to true, then the module won't automatically
+    connect upon instanciation. Instead, you'll have to call "connect()"
+    yourself.
+
+  anyevent_mode
+    Bool, Default 0. If set to true, then all methods can receive a
+    callback, as last argument. If present, the method will return
+    immediately, and the callback will be executed upon completion of the
+    operation, receiving a condvar as first and only argument. If set to
+    false (the default), then the client instance will be synchronous.
+
+METHODS
+  connect
+      my $client->connect();
+
+      # or in AnyEvent mode
+      $cv = AE::cv;
+      $client->connect(sub { print "connected!\n"; $cv->send(); });
+      $cv->recv();
+
+    Connects to the Riak server. This is automatically done when "new()" is
+    called, unless the "no_auto_connect" attribute is set to true. In
+    AnyEvent mode, returns a conditional variable,that will be triggered
+    when connected.
+
+  ping
+      use Try::Tiny;
+      try { $client->ping() } catch { "oops... something is wrong: $_" };
+
+    Perform a ping operation. Will die in case of error. See "is_alive()"
+
+  is_alive
+      $client->is_alive() or warn "oops... something is wrong: $@";
+
+    Perform a ping operation. Will return false in case of error (which will
+    be stored in $@).
+
+  get
+      # blocking mode
+      my $value = $client->get(bucket => 'key');
+
+      # blocking mode, with a callback
+      $client->get(bucket => 'key', sub { my ($value) = @_; do_stuff($value) });
+
+      # AnyEvent mode, asynchronous
+      $cv = AE::cv;
+      $client->get(bucket => 'key', sub { my ($value) = @_; do_stuff($value); $cv->send() });
+      # ...
+      $cv->recv();
+
+    Perform a fetch operation. Expects bucket and key names. If the
+    content_type of the fetched value is 'application/json', automatically
+    decodes the JSON into a Perl structure. If you need the raw data you can
+    use get_raw.
+
+  get_raw
+      my $scalar_value = $client->get_raw(bucket => 'key');
+
+    Perform a fetch operation. Expects bucket and key names. Returns the raw
+    data. If you need decode the json, you should use "get()" instead.
+
+  put
+      $client->put('bucket', 'key', { some_values => [1,2,3] });
+      $client->put('bucket', 'key', { some_values => [1,2,3] }, 'application/json);
+      $client->put('bucket', 'key', 'text', 'plain/text');
+
+      # you can set secondary indexes (2i)
+      $client->put( 'bucket', 'key', 'text', 'plain/text',
+                    { field1_bin => 'abc', field2_int => 42 }
+                  );
+      $client->put( 'bucket', 'key', { some_values => [1,2,3] }, undef,
+                    { field1_bin => 'abc', field2_int => 42 }
+                  );
+
+    Perform a store operation. Expects bucket and key names, the value, the
+    content type (optional, default is 'application/json'), and the indexes
+    to set for this value (optional, default is none).
+
+    Will encode the structure in json string if necessary. If you need only
+    store the raw data you can use put_raw instead.
+
+    IMPORTANT: all the index field names should end by either "_int" or
+    "_bin", depending if the index type is integer or binary.
+
+    To query secondary indexes, see query_index.
+
+  put_raw
+      $client->put_raw('bucket', 'key', encode_json({ some_values => [1,2,3] }), 'application/json');
+      $client->put_raw('bucket', 'key', 'text');
+      $client->put_raw('bucket', 'key', 'text', undef, {field_bin => 'foo'});
+
+    Perform a store operation. Expects bucket and key names, the value, the
+    content type (optional, default is 'plain/text'), and the indexes to set
+    for this value (optional, default is none).
+
+    Will encode the raw data. If you need encode the structure you can use
+    put instead.
+
+    IMPORTANT: all the index field names should end by either "_int" or
+    "_bin", depending if the index type is integer or binary.
+
+    To query secondary indexes, see query_index.
+
+  del
+      $client->del(bucket => key);
+
+    Perform a delete operation. Expects bucket and key names.
+
+  get_keys
+      # in default mode
+      $client->get_keys(foo => sub{
+         my ($key, $done) = @_;
+         # you should use another client inside this callback!
+         $another_client->del(foo => $key);
+      });
+
+      # in anyevent mode
+      my $cv = AE::cv;
+      $client->get_keys(foo => sub{
+         my ($key, $done) = @_;
+         # ... do stuff with $key
+         $done and $cv->send;
+      });
+      $cv->recv();
+
+    WARNING, this method should not be called on a production Riak cluster,
+    as it can have a big performance impact. See Riak's documentation.
+
+    WARNING, because Riak doesn't handles pipelining, you cannot use the
+    same "Riak::Client" instance inside the callback, it would raise an
+    exception.
+
+    Perform a list keys operation. Receive a callback and will call it for
+    each key. The callback will receive two arguments: the key, and a
+    boolean indicating if it's the last key
+
+    The callback is optional, in which case an ArrayRef of all the keys are
+    returned. But don't do that, and always provide a callback, to avoid
+    your RAM usage to skyrocket...
+
+  exists
+      $client->exists(bucket => 'key') or warn "key not found";
+
+    Perform a fetch operation but with head => 0, and the if there is
+    something stored in the bucket/key.
+
+  query_index
+    Perform a secondary index (2i) query. Expects a bucket name, the index
+    field name, the index value you're searching on, and optionally a
+    callback.
+
+    If a callback has been provided, doesn't return anything, but execute
+    the callback on each matching keys. callback will receive the key name
+    as first argument. key name will also be in $_. If no callback is
+    provided, returns and ArrayRef of matching keys.
+
+    The index value you're searching on can be of two types. If it's a
+    Scalar, an exact match query will be performed. if the value is an
+    ArrayRef, then a range query will be performed, the first element in the
+    array will be the range_min, the second element the range_max. other
+    elements will be ignored.
+
+    Based on the example in "put", here is how to query it:
+
+      # exact match
+      my $matching_keys = $client->query_index( 'bucket',  'field2_int', 42 ),
+
+      # range match
+      my $matching_keys = $client->query_index( 'bucket',  'field2_int', [ 40, 50] ),
+
+      # range match with callback
+      $client->query_index( 'bucket',  'field2_int', [ 40, 50], sub { print "key : $_" } ),
+
+  get_buckets
+    WARNING, this method should not be called on a production Riak cluster,
+    as it can have a big performance impact. See Riak's documentation.
+
+  get_bucket_props
+  set_bucket_props
+  map_reduce
+  map_reduce_raw
+CONTRIBUTORS
+    Ivan Kruglov <ivan.kruglov@yahoo.com>
+
+SEE ALSO
+    Net::Riak
+
+    Data::Riak
+
+    Data::Riak::Fast
+
+    Action::Retry
+
+    Riak::Light
+
+    AnyEvent
+
+AUTHOR
+    Damien Krotkine <dams@cpan.org>
+
+COPYRIGHT AND LICENSE
+    This software is copyright (c) 2014 by Damien Krotkine.
+
+    This is free software; you can redistribute it and/or modify it under
+    the same terms as the Perl 5 programming language system itself.
+
