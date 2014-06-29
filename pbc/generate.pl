@@ -9,3 +9,4 @@ Google::ProtocolBuffers->parsefile(
         create_accessors => 1
     }
 );
+

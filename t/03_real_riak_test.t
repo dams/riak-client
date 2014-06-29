@@ -11,7 +11,6 @@ BEGIN {
 use Test::More;
 use Test::Exception;
 use Riak::Client;
-use JSON;
 
 
 my @modes = (

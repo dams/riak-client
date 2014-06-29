@@ -8,7 +8,7 @@ use Type::Params qw(compile);
 use Types::Standard -types;
 use Errno qw(EINTR);
 use Scalar::Util qw(blessed);
-use JSON;
+use JSON::XS;
 use Carp;
 use Module::Runtime qw(use_module);
 require bytes;
@@ -102,7 +102,7 @@ in a complete rewrite with more features, but the same performance.
 
 =attr anyevent_mode
 
-Enables the AnyEvent mode, allowing true asynchronous mode. See below L<ANYEVENT MODE>.
+Enables the AnyEvent mode, allowing true asynchronous mode.
 
 =attr host
 
@@ -273,6 +273,7 @@ sub connect {
 }
 
 has _getkeys_accumulator => (is => 'rw', init_arg => undef);
+has _mapreduce_accumulator => (is => 'rw', init_arg => undef);
 
 use constant {
     # error
@@ -286,22 +287,25 @@ use constant {
     # put, put_raw
     PUT_REQUEST_CODE               => 11,
     PUT_RESPONSE_CODE              => 12,
+    # del
+    DEL_REQUEST_CODE               => 13,
+    DEL_RESPONSE_CODE              => 14,
     # get_buckets
     GET_BUCKETS_REQUEST_CODE       => 15,
     GET_BUCKETS_RESPONSE_CODE      => 16,
     # get_keys
     GET_KEYS_REQUEST_CODE          => 17,
     GET_KEYS_RESPONSE_CODE         => 18,
-    # del
-    DEL_REQUEST_CODE               => 13,
-    DEL_RESPONSE_CODE              => 14,
     # get_bucket_props
     GET_BUCKET_PROPS_REQUEST_CODE  => 19,
     GET_BUCKET_PROPS_RESPONSE_CODE => 20,
     # set_bucket_props
     SET_BUCKET_PROPS_REQUEST_CODE  => 21,
     SET_BUCKET_PROPS_RESPONSE_CODE => 22,
-    # quesry_index
+    # map_reducd
+    MAP_REDUCE_REQUEST_CODE        => 23,
+    MAP_REDUCE_RESPONSE_CODE       => 24,
+    # query_index
     QUERY_INDEX_REQUEST_CODE       => 25,
     QUERY_INDEX_RESPONSE_CODE      => 26,
 };
@@ -565,7 +569,7 @@ sub _handle_get_keys_response {
     my $obj_done = $obj->done
       and $last_key = pop @keys;
 
-    # second arg = more to come
+    # no second arg = more to come
     $cb->($_) foreach @keys;
 
     # if more to come, return by saying so
@@ -758,6 +762,13 @@ sub _handle_query_index_response {
 
 }
 
+=method get_buckets
+
+B<WARNING>, this method should not be called on a production Riak cluster, as
+it can have a big performance impact. See Riak's documentation.
+
+=cut
+
 sub get_buckets {
     state $check = compile(Any, Optional[CodeRef]);
     my ( $self, $cb ) = $check->(@_);
@@ -776,6 +787,11 @@ sub _handle_get_buckets_response {
     my $obj = RpbListBucketsResp->decode( $encoded_message );
     return \($obj->buckets // []);
 }
+
+=method get_bucket_props
+
+
+=cut
 
 sub get_bucket_props {
     state $check = compile(Any, Str, Optional[CodeRef]);
@@ -800,6 +816,11 @@ sub _handle_get_bucket_props_response {
     return \{ %$props }; # unblessing variable
 }
 
+=method set_bucket_props
+
+
+=cut
+
 sub set_bucket_props {
     state $check = compile( Any, Str, 
                             Dict[ n_val => Optional[Int],
@@ -815,6 +836,88 @@ sub set_bucket_props {
         bucket         => $bucket,
         body_ref       => \$body,
     } );
+}
+
+=method map_reduce
+
+
+=cut
+
+sub map_reduce {
+  state $check = compile(Any, Any, Optional[CodeRef]);
+  my ( $self, $request, $cb) = $check->(@_); 
+
+  my @args;
+  
+  push @args, ref($request) ? encode_json($request): $request;
+  push @args, 'application/json';
+  push @args, $cb if $cb;
+  
+  map_reduce_raw($self, @args);
+
+}
+
+sub map_reduce_raw {
+  state $check = compile(Any, Str, Str, Optional[CodeRef]);
+  my ( $self, $request, $content_type, $cb) = $check->(@_);
+  
+  my $body = RpbMapRedReq->encode(
+    {
+      request => $request,
+      content_type => $content_type,
+    }
+  );
+
+  # reset accumulator
+  $self->_mapreduce_accumulator([]);
+
+  $self->_parse_response( {
+      request_code   => MAP_REDUCE_REQUEST_CODE,
+      expected_code  => MAP_REDUCE_RESPONSE_CODE,
+      operation => 'map_reduce',
+      body_ref  => \$body,
+      cb        => $cb,
+      decode    => ($content_type eq 'application/json'),
+      handle_response => \&_handle_map_reduce_response,
+      lock_requests => 1,
+  } );
+}
+
+sub _handle_map_reduce_response {
+    my ( $self, $encoded_message, $args ) = @_;
+    my $obj = RpbMapRedResp->decode( $encoded_message );
+          
+    # case 1 : no user callback
+    my $cb = $args->{cb};
+    if (! $cb ) {
+
+        # all results were there, reset the accumulator and return the whole, 
+        if ($obj->done) {
+            my $results = $self->_mapreduce_accumulator();
+            $self->_mapreduce_accumulator([]);
+            return \$results;
+        }
+
+        # accumulate results
+        push @{$self->_mapreduce_accumulator},
+          { phase => $obj->phase, response => ($args->{decode}) ? decode_json($obj->response // '[]') : $obj->response };
+
+        # more stuff to come, say so
+        return (undef, 1);
+
+    }
+
+    # case 2 : we have a user callback
+
+    # means: nothing left to do, all results processed through callback
+    $obj->done
+      and return;
+
+    $cb->($obj->response, $obj->phase, $obj->done);
+
+    # more stuff to come, say so
+    return (undef, 1);
+
 }
 
 sub _parse_response {
