@@ -840,7 +840,6 @@ sub set_bucket_props {
 
 =method map_reduce
 
-
 =cut
 
 sub map_reduce {
@@ -856,6 +855,10 @@ sub map_reduce {
   map_reduce_raw($self, @args);
 
 }
+
+=method map_reduce_raw
+
+=cut
 
 sub map_reduce_raw {
   state $check = compile(Any, Str, Str, Optional[CodeRef]);
@@ -1155,6 +1158,8 @@ sub _send_bytes {
 
 
 1;
+
+=for Pod::Coverage BUILD
 
 =head1 CONTRIBUTORS
 
