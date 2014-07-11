@@ -21,6 +21,42 @@ use IO::Socket::Timeout;
 
 use Scalar::Util qw(weaken);
 
+use constant {
+    # error
+    ERROR_RESPONSE_CODE            => 0,
+    # ping
+    PING_REQUEST_CODE              => 1,
+    PING_RESPONSE_CODE             => 2,
+    # get, get_raw
+    GET_REQUEST_CODE               => 9,
+    GET_RESPONSE_CODE              => 10,
+    # put, put_raw
+    PUT_REQUEST_CODE               => 11,
+    PUT_RESPONSE_CODE              => 12,
+    # del
+    DEL_REQUEST_CODE               => 13,
+    DEL_RESPONSE_CODE              => 14,
+    # get_buckets
+    GET_BUCKETS_REQUEST_CODE       => 15,
+    GET_BUCKETS_RESPONSE_CODE      => 16,
+    # get_keys
+    GET_KEYS_REQUEST_CODE          => 17,
+    GET_KEYS_RESPONSE_CODE         => 18,
+    # get_bucket_props
+    GET_BUCKET_PROPS_REQUEST_CODE  => 19,
+    GET_BUCKET_PROPS_RESPONSE_CODE => 20,
+    # set_bucket_props
+    SET_BUCKET_PROPS_REQUEST_CODE  => 21,
+    SET_BUCKET_PROPS_RESPONSE_CODE => 22,
+    # map_reducd
+    MAP_REDUCE_REQUEST_CODE        => 23,
+    MAP_REDUCE_RESPONSE_CODE       => 24,
+    # query_index
+    QUERY_INDEX_REQUEST_CODE       => 25,
+    QUERY_INDEX_RESPONSE_CODE      => 26,
+};
+
+
 # ABSTRACT: Fast and lightweight Perl client for Riak
 
 =head1 SYNOPSIS
@@ -132,9 +168,11 @@ Float, Default 5. Timeout for connection operation, in seconds. Set to 0 for no 
 
 Float, Default 5. Timeout for read operation, in seconds. Set to 0 for no timeout.
 
-=attr write_timeout
+=attr no_delay
 
-Float, Default 5. Timeout for write operation, in seconds. Set to 0 for no timeout.
+Boolean, Default 0. If set to a true value, TCP_NODELAY will be enabled on the
+socket, which means deactivating Nagle's algorithm. Use only if you know what
+you're doing.
 
 =cut
 
@@ -146,6 +184,7 @@ has dw      => ( is => 'ro', isa => Int,  default  => sub {1} );
 has connection_timeout => ( is => 'ro',                 isa => Num,  default  => sub {5} );
 has read_timeout       => ( is => 'ro', predicate => 1, isa => Num,  default  => sub {5} );
 has write_timeout      => ( is => 'ro', predicate => 1, isa => Num,  default  => sub {5} );
+has no_delay           => ( is => 'ro',                 isa => Bool, default  => sub {0} );
 
 =attr no_auto_connect
 
@@ -182,7 +221,7 @@ sub _build__handle {
     # TODO = timeouts
     $handle = AnyEvent::Handle->new (
       connect  => [$host, $port],
-      no_delay => 1,
+      no_delay => $self->no_delay(),
       on_error => sub {
          $handle->destroy; # explicitly destroy handle
          my $command = $self->{_req_command} // "<unknown>";
@@ -196,6 +235,83 @@ sub _build__handle {
       on_connect => sub { $self->_cv_connected->send },
 #      on_timeout => sub { print STDERR " ---- PLOP \n";},
     );
+
+}
+
+
+# Why are we doing that ? It's because we want to avoid creating these closure
+# everytime we send or recerive data from the socket. So we build them here
+# once and for all. However the tricky part is that these callbacks need to
+# access $self and $args. So we make sure they can.
+has _current_request_ae_args => ( is => 'rw', default => sub { [] } );
+has _handle_reader_callback => ( is => 'ro', lazy => 1, builder => 1 );
+sub _build__handle_reader_callback {
+
+    my ($self) = @_;
+
+    weaken $self;
+
+    my $handle_reader_callback;
+
+    my $inner_handle_reader_callback = sub {
+        my ( $response_code, $response_body ) = unpack( 'c a*', $_[1] );
+    
+        my $args = $self->_current_request_ae_args->[0]
+          or _die_generic_error( "Unexpected Response (got: $response_code, expected: nothing)", {} );
+
+
+        # in case of error msg
+        if ($response_code == ERROR_RESPONSE_CODE) {
+            my $decoded_message = RpbErrorResp->decode($response_body);
+            my $errmsg  = $decoded_message->errmsg;
+            my $errcode = $decoded_message->errcode;
+    
+            _die_generic_error( "Riak Error (code: $errcode) '$errmsg'", $args );
+        }
+    
+        # check if we have what we want
+        $response_code != $args->{expected_code}
+          and _die_generic_error(
+                                 "Unexpected Response Code in (got: $response_code, expected: $args->{expected_code})",
+                                 $args );
+    
+        # default value if we don't need to handle the response.
+        my ($ret, $more_to_come) = ( \1, undef);
+        # remember, $handle_response may or may not use $args->{cb}
+        if (my $handle_response = $args->{handle_response}) {
+            ($ret, $more_to_come) = $handle_response->( $self, $response_body, $args );
+        }
+        # if we expect more to come, re-prepend the handler
+        $more_to_come and $_[0]->unshift_read( chunk => 4, $handle_reader_callback ),
+          return;
+    
+        # ok, single or multiple response are over, remove the current request
+        # args, and remove the lock. This is done before last callback
+        # execution, so that user can re-enqueue a request right away.
+        shift @{$self->_current_request_ae_args};
+        my $lock = $self->_requests_lock;
+        $lock and $lock->send();
+    
+        # if no user callback provided, use the $cv and return.
+        $args->{cv} and $args->{cv}->send($ret),
+          return;
+    
+        # If $ret is undef, means everything has been processed and
+        # callback called in $handle_response, nothing left to do.
+        # Otherwise, we have a result, call the callback on it
+        $ret and $args->{cb}->($$ret);
+    
+    };
+
+    $handle_reader_callback = sub {
+        # length arrived, decode
+        my $len = unpack "N", $_[1];
+        # now read the payload
+        $_[0]->unshift_read( chunk => $len, $inner_handle_reader_callback);
+    };
+
+    $handle_reader_callback;
+
 }
 
 has _socket => ( is => 'ro', lazy => 1, builder => 1 );
@@ -226,7 +342,8 @@ sub _build__socket {
       and $socket->write_timeout($self->write_timeout);
 
     use Socket qw(IPPROTO_TCP TCP_NODELAY);
-    $socket->setsockopt(IPPROTO_TCP, TCP_NODELAY, 1);
+    $self->no_delay
+      and $socket->setsockopt(IPPROTO_TCP, TCP_NODELAY, 1);
 
     return $socket;
 }
@@ -274,41 +391,6 @@ sub connect {
 
 has _getkeys_accumulator => (is => 'rw', init_arg => undef);
 has _mapreduce_accumulator => (is => 'rw', init_arg => undef);
-
-use constant {
-    # error
-    ERROR_RESPONSE_CODE            => 0,
-    # ping
-    PING_REQUEST_CODE              => 1,
-    PING_RESPONSE_CODE             => 2,
-    # get, get_raw
-    GET_REQUEST_CODE               => 9,
-    GET_RESPONSE_CODE              => 10,
-    # put, put_raw
-    PUT_REQUEST_CODE               => 11,
-    PUT_RESPONSE_CODE              => 12,
-    # del
-    DEL_REQUEST_CODE               => 13,
-    DEL_RESPONSE_CODE              => 14,
-    # get_buckets
-    GET_BUCKETS_REQUEST_CODE       => 15,
-    GET_BUCKETS_RESPONSE_CODE      => 16,
-    # get_keys
-    GET_KEYS_REQUEST_CODE          => 17,
-    GET_KEYS_RESPONSE_CODE         => 18,
-    # get_bucket_props
-    GET_BUCKET_PROPS_REQUEST_CODE  => 19,
-    GET_BUCKET_PROPS_RESPONSE_CODE => 20,
-    # set_bucket_props
-    SET_BUCKET_PROPS_REQUEST_CODE  => 21,
-    SET_BUCKET_PROPS_RESPONSE_CODE => 22,
-    # map_reducd
-    MAP_REDUCE_REQUEST_CODE        => 23,
-    MAP_REDUCE_RESPONSE_CODE       => 24,
-    # query_index
-    QUERY_INDEX_REQUEST_CODE       => 25,
-    QUERY_INDEX_RESPONSE_CODE      => 26,
-};
 
 =method ping
 
@@ -363,7 +445,7 @@ sub is_alive {
 
 Perform a fetch operation. Expects bucket and key names. If the content_type of
 the fetched value is 'application/json', automatically decodes the JSON into a
-Perl structure. If you need the raw data you can use L<get_raw>.
+Perl structure. If you need the raw data you can use C<get_raw>.
 
 =cut
 
@@ -378,7 +460,7 @@ sub get {
   my $scalar_value = $client->get_raw(bucket => 'key');
 
 Perform a fetch operation. Expects bucket and key names. Returns the raw data.
-If you need decode the json, you should use C<get()> instead.
+If you want json to be automatically decoded, you should use C<get()> instead.
 
 =cut
 
@@ -395,11 +477,32 @@ sub get_raw {
   $client->put('bucket', 'key', 'text', 'plain/text');
 
   # you can set secondary indexes (2i)
-  $client->put( 'bucket', 'key', 'text', 'plain/text',
+  $client->put( 'bucket', 'key', 'text_value', 'plain/text',
                 { field1_bin => 'abc', field2_int => 42 }
               );
   $client->put( 'bucket', 'key', { some_values => [1,2,3] }, undef,
                 { field1_bin => 'abc', field2_int => 42 }
+              );
+
+  # you can also set links
+  $client->put( 'bucket', 'key', 'text', 'plain/text', undef,
+                { link_tag1 => 'bucket/key',
+                  link_tag2 => 'other_bucket/key',
+                }
+              );
+
+  # you can set multiple links for the same tag
+  $client->put( 'bucket', 'key', 'text', 'plain/text', undef,
+                { link_tag1 => [ qw( bucket/key bucket2/key2 ) ],
+                  link_tag2 => 'other_bucket/key',
+                }
+              );
+
+  # you can also use this form (marginally faster)
+  $client->put( 'bucket', 'key', 'text', 'plain/text', undef,
+                [ { tag => 'link_tag1', bucket => 'bucket1', key => 'key1'},
+                  { tag => 'link_tag2', bucket => 'bucket2', key => 'key2'},
+                ],
               );
 
 Perform a store operation. Expects bucket and key names, the value, the content
@@ -407,25 +510,31 @@ type (optional, default is 'application/json'), and the indexes to set for this
 value (optional, default is none).
 
 Will encode the structure in json string if necessary. If you need only store
-the raw data you can use L<put_raw> instead.
+the raw data you can use C<put_raw> instead.
 
 B<IMPORTANT>: all the index field names should end by either C<_int> or
 C<_bin>, depending if the index type is integer or binary.
 
-To query secondary indexes, see L<query_index>.
+To query secondary indexes, see C<query_index>.
 
 =cut
 
+#my $LinksStructure = declare as ArrayRef[Dict[bucket => Str, key => Str, tag => Str]];
+#coerce $LinksStructure, from HashRef[] Num, q{ int($_) };
+
 sub put {
     my $cb = ref $_[-1] eq 'CODE' ? pop : undef;
-    state $check = compile(Any, Str, Str, Any, Optional[Str], Optional[HashRef[Str]]);
-    my ( $self, $bucket, $key, $value, $content_type, $indexes ) = $check->(@_);
+    state $check = compile(Any, Str, Str, Any, Optional[Str],
+                           Optional[HashRef[Str]], # indexes
+                           Optional[ArrayRef[Dict[bucket => Str, key => Str, tag => Str]]], # links
+                          );
+    my ( $self, $bucket, $key, $value, $content_type, $indexes, $links ) = $check->(@_);
 
     ($content_type //= 'application/json')
       eq 'application/json'
         and $value = encode_json($value);
 
-    $self->_store( $bucket, $key, $value, $content_type, $indexes, $cb);
+    $self->_store( $bucket, $key, $value, $content_type, $indexes, $links, $cb);
 }
 
 
@@ -434,27 +543,34 @@ sub put {
   $client->put_raw('bucket', 'key', encode_json({ some_values => [1,2,3] }), 'application/json');
   $client->put_raw('bucket', 'key', 'text');
   $client->put_raw('bucket', 'key', 'text', undef, {field_bin => 'foo'});
+  $client->put_raw('bucket', 'key', 'text', undef, {field_bin => 'foo'}, $links);
+
+For more example, see C<put>.
 
 Perform a store operation. Expects bucket and key names, the value, the content
-type (optional, default is 'plain/text'), and the indexes to set for this value
-(optional, default is none).
+type (optional, default is 'plain/text'), the indexes (optional, default is
+none), and links (optional, default is none) to set for this value
 
-Will encode the raw data. If you need encode the structure you can use L<put>
-instead.
+This method won't encode the data, but pass it as such, trusting it's in the
+type you've indicated in the passed content-type. If you want the structure to
+be automatically encoded, use C<put> instead.
 
 B<IMPORTANT>: all the index field names should end by either C<_int> or
 C<_bin>, depending if the index type is integer or binary.
 
-To query secondary indexes, see L<query_index>.
+To query secondary indexes, see C<query_index>.
 
 =cut
 
 sub put_raw {
     my $cb = ref $_[-1] eq 'CODE' ? pop : undef;
-    state $check = compile(Any, Str, Str, Any, Optional[Str], Optional[HashRef[Str]]);
-    my ( $self, $bucket, $key, $value, $content_type, $indexes ) = $check->(@_);
+    state $check = compile(Any, Str, Str, Any, Optional[Str],
+                           Optional[HashRef[Str]], # indexes
+                           Optional[ArrayRef[Dict[bucket => Str, key => Str, tag => Str]]], # links
+                          );
+    my ( $self, $bucket, $key, $value, $content_type, $indexes, $links ) = $check->(@_);
     $content_type ||= 'plain/text';
-    $self->_store( $bucket, $key, $value, $content_type, $indexes, $cb);
+    $self->_store( $bucket, $key, $value, $content_type, $indexes, $links, $cb);
 }
 
 =method del
@@ -653,7 +769,7 @@ sub _handle_get_response {
 }
 
 sub _store {
-    my ( $self, $bucket, $key, $encoded_value, $content_type, $indexes, $cb ) = @_;
+    my ( $self, $bucket, $key, $encoded_value, $content_type, $indexes, $links, $cb ) = @_;
 
     my $body = RpbPutReq->encode(
         {   key     => $key,
@@ -662,12 +778,14 @@ sub _store {
                 value        => $encoded_value,
                 content_type => $content_type,
                 ( $indexes ?
-                  (indexes => [
-                              map {
-                                  { key => $_ , value => $indexes->{$_} }
-                              } keys %$indexes
-                             ])
-                  : () ),
+                  ( indexes => [
+                                map {
+                                    { key => $_ , value => $indexes->{$_} }
+                                } keys %$indexes
+                               ])
+                  : ()
+                ),
+                ( $links ? ( links => $links) : () ),
             },
         }
     );
@@ -889,7 +1007,7 @@ sub map_reduce_raw {
 sub _handle_map_reduce_response {
     my ( $self, $encoded_message, $args ) = @_;
     my $obj = RpbMapRedResp->decode( $encoded_message );
-          
+
     # case 1 : no user callback
     my $cb = $args->{cb};
     if (! $cb ) {
@@ -1015,60 +1133,19 @@ sub _parse_response_ae {
     $args->{cb}
       or $cv = AE::cv;
 
-    my $reader_handler;
-    $reader_handler = sub {
+    # Store the cv also in the args so that the callback can get access to it
+    $args->{cv} = $cv;
 
-        # length arrived, decode
-        my $len = unpack "N", $_[1];
-        # now read the payload
-        $_[0]->unshift_read( chunk => $len, sub {
-            my ( $response_code, $response_body ) = unpack( 'c a*', $_[1] );
-
-            # in case of error msg
-            if ($response_code == ERROR_RESPONSE_CODE) {
-                my $decoded_message = RpbErrorResp->decode($response_body);
-                my $errmsg  = $decoded_message->errmsg;
-                my $errcode = $decoded_message->errcode;
-
-                _die_generic_error( "Riak Error (code: $errcode) '$errmsg'", $args );
-            }
-
-            # check if we have what we want
-            $response_code != $args->{expected_code}
-              and _die_generic_error(
-                      "Unexpected Response Code in (got: $response_code, expected: $args->{expected_code})",
-                      $args );
-
-            # default value if we don't need to handle the response.
-            my ($ret, $more_to_come) = ( \1, undef);
-            # remember, $handle_response may or may not use $args->{cb}
-            if (my $handle_response = $args->{handle_response}) {
-                ($ret, $more_to_come) = $handle_response->( $self, $response_body, $args );
-            }
-            # if we expect more to come, re-prepend the handler
-            $more_to_come and $_[0]->unshift_read( chunk => 4, $reader_handler ),
-                              return;
-
-            # ok, single or multiple response are over, remove the lock.
-            # This is done before last callback execution, so that user can
-            # re-enqueue a request right away.
-            my $lock = $self->_requests_lock;
-            $lock and $lock->send();
-
-            # if no user callback provided, use the $cv and return.
-            $cv and $cv->send($ret),
-                    return;
-
-            # If $ret is undef, means everything has been processed and
-            # callback called in $handle_response, nothing left to do.
-            # Otherwise, we have a result, call the callback on it
-            $ret and $args->{cb}->($$ret);
-            
-          });
-    };
+    # Finally, store the given args to be reacheble from $self, so that
+    # _handle_reader_callback can get it. We push it in our stack, because we
+    # can stack up multiple requests, and get the response only after that.
+    # However we have the guarantee from AnyEvent and Riak that we will get the
+    # answers in order (for a given Riak connection, that is, for a given
+    # $self).
+    push @{$self->_current_request_ae_args()}, $args;
 
     # OK, now try to read from the socket with the handler
-    $self->_handle->push_read( chunk => 4, $reader_handler);
+    $self->_handle->push_read( chunk => 4, $self->_handle_reader_callback);
 
     # we were given a user callback, don't be synchronous, immediately return.
     $cv or return;
@@ -1087,8 +1164,7 @@ sub _die_generic_error {
     my ( $error, $args ) = @_;
 
     my ($operation_name, $bucket, $key) =
-      map { $_ // "<unknown $_>" }
-      @{$args}{qw( operation_name bucket key)};
+      map { $args->{$_} // "<unknown $_>" } ( qw( operation_name bucket key) );
 
     my $extra = '';
     defined $bucket && defined $key
@@ -1159,11 +1235,41 @@ sub _send_bytes {
 
 1;
 
+=head1 BENCHMARKS
+
+Note: These benchmarks are the one provided by C<Riak::Light>.
+
+Note: the AnyEvent mode is a bit slower below, because we are forcing
+synchronous mode, even in AnyEvent, so the benchmark is paying the price of
+having AnyEvent enabled but not used.
+
+=head2 GETS
+
+                                  Rate Data::Riak (REST) Riak::Tiny (REST) Net::Riak (REST) Data::Riak::Fast (REST) Net::Riak (PBC) Riak::Client (PBC + AnyEvent) Riak::Light (PBC) Riak::Client (PBC)
+  Data::Riak (REST)              427/s                --              -30%             -31%                    -43%            -65%                          -85%              -90%               -91%
+  Riak::Tiny (REST)              611/s               43%                --              -2%                    -19%            -51%                          -79%              -86%               -87%
+  Net::Riak (REST)               623/s               46%                2%               --                    -17%            -50%                          -78%              -86%               -87%
+  Data::Riak::Fast (REST)        755/s               77%               24%              21%                      --            -39%                          -74%              -83%               -84%
+  Net::Riak (PBC)               1238/s              190%              103%              99%                     64%              --                          -57%              -72%               -74%
+  Riak::Client (PBC + AnyEvent) 2878/s              573%              371%             362%                    281%            132%                            --              -34%               -39%
+  Riak::Light (PBC)             4348/s              917%              612%             598%                    476%            251%                           51%                --                -8%
+  Riak::Client (PBC)            4706/s             1001%              671%             655%                    524%            280%                           64%                8%                 --
+
+
+=head2 PUTS
+
+                                  Rate Net::Riak (REST) Data::Riak (REST) Riak::Tiny (REST) Data::Riak::Fast (REST) Net::Riak (PBC) Riak::Light (PBC) Riak::Client (PBC + AnyEvent) Riak::Client (PBC)
+  Net::Riak (REST)               542/s               --              -15%              -29%                    -55%            -57%              -90%                          -92%               -92%
+  Data::Riak (REST)              635/s              17%                --              -17%                    -47%            -49%              -89%                          -90%               -90%
+  Riak::Tiny (REST)              765/s              41%               20%                --                    -36%            -39%              -86%                          -88%               -88%
+  Data::Riak::Fast (REST)       1198/s             121%               89%               57%                      --             -4%              -79%                          -82%               -82%
+  Net::Riak (PBC)               1254/s             131%               97%               64%                      5%              --              -78%                          -81%               -81%
+  Riak::Light (PBC)             5634/s             939%              787%              637%                    370%            349%                --                          -14%               -14%
+  Riak::Client (PBC + AnyEvent) 6557/s            1110%              933%              757%                    448%            423%               16%                            --                 0%
+  Riak::Client (PBC)            6557/s            1110%              933%              757%                    448%            423%               16%                            0%                 --
+
+
 =for Pod::Coverage BUILD
-
-=head1 CONTRIBUTORS
-
-Ivan Kruglov <ivan.kruglov@yahoo.com>
 
 =head1 SEE ALSO
 
