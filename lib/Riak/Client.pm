@@ -761,7 +761,7 @@ sub _handle_get_response {
     my $content_type = $content->[0]->content_type;
 
     # if we need to decode
-    $args->{decode} && $content_type eq 'application/json'
+    $args->{decode} && ($content_type // '') eq 'application/json'
       and return \decode_json($value);
 
     # simply return the value
