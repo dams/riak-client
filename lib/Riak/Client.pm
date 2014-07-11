@@ -1284,3 +1284,7 @@ L<Action::Retry>
 L<Riak::Light>
 
 L<AnyEvent>
+
+=head1 CONTRIBUTORS
+  
+Ivan Kruglov <ivan.kruglov@yahoo.com>
