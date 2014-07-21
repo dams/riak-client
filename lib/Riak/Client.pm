@@ -246,9 +246,7 @@ sub _build__handle {
 has _current_request_ae_args => ( is => 'rw', default => sub { [] } );
 has _handle_reader_callback => ( is => 'ro', lazy => 1, builder => 1 );
 sub _build__handle_reader_callback {
-
     my ($self) = @_;
-
     weaken $self;
 
     my $handle_reader_callback;
@@ -303,6 +301,7 @@ sub _build__handle_reader_callback {
     
     };
 
+    weaken $inner_handle_reader_callback;
     $handle_reader_callback = sub {
         # length arrived, decode
         my $len = unpack "N", $_[1];
@@ -311,7 +310,6 @@ sub _build__handle_reader_callback {
     };
 
     $handle_reader_callback;
-
 }
 
 has _socket => ( is => 'ro', lazy => 1, builder => 1 );
