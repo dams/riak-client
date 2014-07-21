@@ -249,7 +249,7 @@ sub _build__handle_reader_callback {
     my ($self) = @_;
     weaken $self;
 
-    my $handle_reader_callback;
+    my $handle_reader_callback_weak;
 
     my $inner_handle_reader_callback = sub {
         my ( $response_code, $response_body ) = unpack( 'c a*', $_[1] );
@@ -280,7 +280,7 @@ sub _build__handle_reader_callback {
             ($ret, $more_to_come) = $handle_response->( $self, $response_body, $args );
         }
         # if we expect more to come, re-prepend the handler
-        $more_to_come and $_[0]->unshift_read( chunk => 4, $handle_reader_callback ),
+        $more_to_come and $_[0]->unshift_read( chunk => 4, $handle_reader_callback_weak),
           return;
     
         # ok, single or multiple response are over, remove the current request
@@ -301,14 +301,15 @@ sub _build__handle_reader_callback {
     
     };
 
-    weaken $inner_handle_reader_callback;
-    $handle_reader_callback = sub {
+    my $handle_reader_callback = sub {
         # length arrived, decode
         my $len = unpack "N", $_[1];
         # now read the payload
         $_[0]->unshift_read( chunk => $len, $inner_handle_reader_callback);
     };
 
+    $handle_reader_callback_weak = $handle_reader_callback;
+    weaken $handle_reader_callback_weak;
     $handle_reader_callback;
 }
 
