@@ -214,27 +214,35 @@ has _handle => ( is => 'ro', lazy => 1, builder => 1 );
 sub _build__handle {
     my ($self) = @_;
     my ($host, $port) = ($self->host, $self->port);
-    my $handle;
 
     weaken $self;
+
+    my $handle;
+
+    my $on_error_handle = sub {
+        $handle->destroy; # explicitly destroy handle
+        my $command = $self->{_req_command} // "<unknown>";
+        my $bucket = $self->{_req_bucket} // "<unknown>";
+        my $key = $self->{_req_key} // "<unknown>";
+        croak("Error ($_[2]) on $host:$port, while performing: command '$command' on bucket '$bucket' and key '$key'");
+    };
+    weaken $on_error_handle;
+
 
     # TODO = timeouts
     $handle = AnyEvent::Handle->new (
       connect  => [$host, $port],
       no_delay => $self->no_delay(),
-      on_error => sub {
-         $handle->destroy; # explicitly destroy handle
-         my $command = $self->{_req_command} // "<unknown>";
-         my $bucket = $self->{_req_bucket} // "<unknown>";
-         my $key = $self->{_req_key} // "<unknown>";
-         croak("Error ($_[2]) on $host:$port, while performing: command '$command' on bucket '$bucket' and key '$key'");
-      },
+      on_error => $on_error_handle,
 #      rtimeout => $self->read_timeout,
 #      wtimeout => $self->write_timeout,
 #      on_prepare => sub { $self->connection_timeout },
       on_connect => sub { $self->_cv_connected->send },
 #      on_timeout => sub { print STDERR " ---- PLOP \n";},
     );
+
+
+    $handle;
 
 }
 
