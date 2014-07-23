@@ -72,22 +72,20 @@ version 1.91
      $another_client->del(foo => $key);
 
   });
-
+  
 =head1 DESCRIPTION
 
 Riak::Client is a fast and light Perl client for Riak using PBC interface, with
 optional AnyEvent mode.
 
-It supports operations like ping, get, exists, put, del, and secondary indexes
-(so-called 2i) setting and querying.
+It supports operations like ping, get, exists, put, del, secondary indexes
+(so-called 2i) setting and querying, and Map Reduce querying.
 
 It has two modes, a traditional procedural mode, and an event based mode, using
 AnyEvent.
 
 It started as a fork of C<Riak::Light> to fix some bugs, but actually ended up
 in a complete rewrite with more features, but the same performance.
-
-=head1 ATTRIBUTES
 
 =head2 anyevent_mode
 
@@ -140,60 +138,104 @@ callback will be executed upon completion of the operation, receiving a condvar
 as first and only argument. If set to false (the default), then the client
 instance will be synchronous.
 
-=head1 METHODS
-
 =head2 connect
 
-  my $client->connect();
+  $client->connect();
+  $client->connect($coderef);
 
-  # or in AnyEvent mode
+Connects to the Riak server. On error, will raise an exception. This is
+automatically done when C<new()> is called, unless the C<no_auto_connect>
+attribute is set to true. Accepts an optional callback, that will be executed
+when connected.
+
+  # example in AnyEvent mode
   $cv = AE::cv;
   $client->connect(sub { print "connected!\n"; $cv->send(); });
-  $cv->recv();
-
-Connects to the Riak server. This is automatically done when C<new()> is
-called, unless the C<no_auto_connect> attribute is set to true. In AnyEvent
-mode, returns a conditional variable,that will be triggered when connected.
-
-=head2 ping
-
-  use Try::Tiny;
-  try { $client->ping() } catch { "oops... something is wrong: $_" };
-
-Perform a ping operation. Will die in case of error. See C<is_alive()>
-
-=head2 is_alive
-
-  $client->is_alive() or warn "oops... something is wrong: $@";
-
-Perform a ping operation. Will return false in case of error (which will be stored in $@).
-
-=head2 get
-
-  # blocking mode
-  my $value = $client->get(bucket => 'key');
-
-  # blocking mode, with a callback
-  $client->get(bucket => 'key', sub { my ($value) = @_; do_stuff($value) });
-
-  # AnyEvent mode, asynchronous
-  $cv = AE::cv;
-  $client->get(bucket => 'key', sub { my ($value) = @_; do_stuff($value); $cv->send() });
   # ...
   $cv->recv();
 
-Perform a fetch operation. Expects bucket and key names. If the content_type of
-the fetched value is 'application/json', automatically decodes the JSON into a
-Perl structure. If you need the raw data you can use C<get_raw>.
+=head2 ping
+
+ my $result = $client->ping();
+ $client->ping($coderef);
+
+Performs a ping operation. On error, will raise an exception. Accepts an
+optional callback, that will be executed upon completion
+
+  # example in AnyEvent mode
+  $cv = AE::cv;
+  $client->ping(sub { print "got $_[0] \n"; $cv->send(); });
+  # ...
+  $cv->recv();
+
+  # an other example
+  use Try::Tiny;
+  try { $client->ping() } catch { "oops... something is wrong: $_" };
+
+See also C<is_alive()>.
+
+=head2 is_alive
+
+ my $is_alive = $client->is_alive();
+ $client->is_alive($coderef);
+
+Checks if the connection is alive. Returns true or false. On error, will raise
+an exception. Accepts an optional callback, that will be executed upon
+completion. Even in AnyEvent mode, this operation is synchronous.
+
+  # example in AnyEvent mode
+  $cv = AE::cv;
+  $client->is_alive(sub { print($_[0] ? "alive\n" : "dead\n"); $cv->send(); });
+  # ...
+  $cv->recv();
+
+=head2 get
+
+  my $value = $client->get($bucket, $key);
+  $client->get($bucket, $key, $coderef);
+
+  # example in AnyEvent mode
+  $cv = AE::cv;
+  $client->get('bucket', 'key', sub { do_stuff_with_value($_[0]); $cv->send() });
+  # ...
+  $cv->recv();
+
+Performs a fetch operation. Expects bucket and key names. Returns the value. On
+error, will raise an exception. Accepts an optional callback, that will be
+called upon completion, with the value as first argument. If the content_type
+of the fetched value is C<'application/json'>, automatically decodes the JSON
+into a Perl structure. If you need the raw data you can use C<get_raw>.
 
 =head2 get_raw
 
-  my $scalar_value = $client->get_raw(bucket => 'key');
+  my $value = $client->get_raw($bucket, $key);
+  $client->get_raw($bucket, $key, $coderef);
 
-Perform a fetch operation. Expects bucket and key names. Returns the raw data.
-If you want json to be automatically decoded, you should use C<get()> instead.
+Same as C<get>, but no automatic JSON decoding will be performed. If you want
+JSON to be automatically decoded, you should use C<get()> instead.
 
 =head2 put
+
+  $client->put($bucket, $key, $value);
+  $client->put($bucket, $key, $value, $coderef);
+  $client->put($bucket, $key, $value, $mime_type, $coderef);
+  $client->put($bucket, $key, $value, $mime_type, $secondary_indexes, $coderef);
+  $client->put($bucket, $key, $value, $mime_type, $secondary_indexes, $links, $coderef);
+
+Performs a store operation. Expects bucket and key names, the value, the
+content type (optional, default is 'application/json'), the indexes to set for
+this value (optional, default is none), the links to set for this value
+(optional, default is none), and an optional coderef. On error, will raise an
+exception
+
+Will encode the structure in json string if necessary. If you need to store the
+raw data you should use C<put_raw> instead.
+
+B<IMPORTANT>: all the index field names should end by either C<_int> or
+C<_bin>, depending if the index type is integer or binary.
+
+To query secondary indexes, see C<query_index>.
+
 
   $client->put('bucket', 'key', { some_values => [1,2,3] });
   $client->put('bucket', 'key', { some_values => [1,2,3] }, 'application/json);
@@ -228,17 +270,16 @@ If you want json to be automatically decoded, you should use C<get()> instead.
                 ],
               );
 
-Perform a store operation. Expects bucket and key names, the value, the content
-type (optional, default is 'application/json'), and the indexes to set for this
-value (optional, default is none).
+  # example in AnyEvent mode
+  $cv = AE::cv;
+  $client->put( 'bucket', 'key', 'some_text', 'plain/text',
+                { field1_bin => 'abc', field2_int => 42 },
+                { next_key => 'bucket2/foo'},
+                sub { print "data is sent to Riak\n"; $cv->send() },
+              );
+  # ...
+  $cv->recv();
 
-Will encode the structure in json string if necessary. If you need only store
-the raw data you can use C<put_raw> instead.
-
-B<IMPORTANT>: all the index field names should end by either C<_int> or
-C<_bin>, depending if the index type is integer or binary.
-
-To query secondary indexes, see C<query_index>.
 
 =head2 put_raw
 
@@ -303,7 +344,7 @@ usage to skyrocket...
 =head2 exists
 
   $client->exists(bucket => 'key') or warn "key not found";
-
+  
 Perform a fetch operation but with head => 0, and the if there is something
 stored in the bucket/key.
 
@@ -366,6 +407,7 @@ having AnyEvent enabled but not used.
   Riak::Light (PBC)             4348/s              917%              612%             598%                    476%            251%                           51%                --                -8%
   Riak::Client (PBC)            4706/s             1001%              671%             655%                    524%            280%                           64%                8%                 --
 
+
 =head2 PUTS
 
                                   Rate Net::Riak (REST) Data::Riak (REST) Riak::Tiny (REST) Data::Riak::Fast (REST) Net::Riak (PBC) Riak::Light (PBC) Riak::Client (PBC + AnyEvent) Riak::Client (PBC)
@@ -377,6 +419,7 @@ having AnyEvent enabled but not used.
   Riak::Light (PBC)             5634/s             939%              787%              637%                    370%            349%                --                          -14%               -14%
   Riak::Client (PBC + AnyEvent) 6557/s            1110%              933%              757%                    448%            423%               16%                            --                 0%
   Riak::Client (PBC)            6557/s            1110%              933%              757%                    448%            423%               16%                            0%                 --
+
 
 =for Pod::Coverage BUILD
 
@@ -405,4 +448,6 @@ This software is copyright (c) 2014 by Damien Krotkine.
 This is free software; you can redistribute it and/or modify it under
 the same terms as the Perl 5 programming language system itself.
 
-=cut
+=head1 CONTRIBUTORS
+  
+Ivan Kruglov <ivan.kruglov@yahoo.com>
