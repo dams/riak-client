@@ -17,7 +17,7 @@ my @modes = (
              [ 'standard nocb', 0 ],
              [ 'standard cb', 1 ],
              [ 'AE nocb', 0, anyevent_mode => 1 ],
-             [ 'AE cb', 0, anyevent_mode => 1 ],
+             [ 'AE cb', 1, anyevent_mode => 1 ],
            );
 plan tests => 6 * scalar(@modes);
 

@@ -10,6 +10,7 @@ use Errno qw(EINTR);
 use Scalar::Util qw(blessed);
 use JSON::XS;
 use Carp;
+$Carp::Internal{ (__PACKAGE__) }++;
 use Module::Runtime qw(use_module);
 require bytes;
 use Moo;
@@ -223,10 +224,8 @@ sub _build__handle {
       no_delay => $self->no_delay(),
       on_error => sub {
         $_[0]->destroy; # explicitly destroy handle
-        my $command = $self->{_req_command} // "<unknown>";
-        my $bucket = $self->{_req_bucket} // "<unknown>";
-        my $key = $self->{_req_key} // "<unknown>";
-        croak("Error ($_[2]) on $host:$port, while performing: command '$command' on bucket '$bucket' and key '$key'");
+
+        _die_generic_error("on host $host:$port: $_[2]", $self->_current_request_ae_args->[0] // {});
     },
 #      rtimeout => $self->read_timeout,
 #      wtimeout => $self->write_timeout,
@@ -290,7 +289,8 @@ sub _build__handle_reader_callback {
         $lock and $lock->send();
     
         # if no user callback provided, use the $cv and return.
-        $args->{cv} and $args->{cv}->send($ret),
+        !$args->{cb}
+          and $args->{cv}->send($ret),
           return;
     
         # If $ret is undef, means everything has been processed and
@@ -1146,7 +1146,7 @@ sub _parse_response_ae {
     $self->_handle->push_read( chunk => 4, $self->_handle_reader_callback);
 
     # we were given a user callback, don't be synchronous, immediately return.
-    $cv or return;
+    $args->{cb} and return;
 
     # no user callback, let's be synchronous
     my $res = $cv->recv();
@@ -1168,7 +1168,12 @@ sub _die_generic_error {
     defined $bucket && defined $key
       and $extra = "(bucket: $bucket, key: $key) ";
 
-    croak "Error in '$operation_name' $extra: $error";
+    my $msg = "Error in '$operation_name' $extra: $error";
+    if (my $cv = $args->{cv}) {
+        $cv->croak($msg);
+    } else {
+        croak $msg;
+    }
 }
 
 sub _read_response {

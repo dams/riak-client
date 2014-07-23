@@ -18,7 +18,7 @@ my @modes = (
              [ 'standard nocb', 0 ],
              [ 'standard cb', 1 ],
              [ 'AE nocb', 0, anyevent_mode => 1 ],
-             [ 'AE cb', 0, anyevent_mode => 1 ],
+             [ 'AE cb', 1, anyevent_mode => 1 ],
            );
 
 #plan tests => 6 * scalar(@modes);
@@ -81,7 +81,7 @@ no_leaks_ok {
     $client->exists( foo => 'bar' );
 
     $client->put( foo => "baz", 'TEXT', 'plain/text' );
-    $client->get( foo => "baz" ), 'TEXT';
+    $client->get( foo => "baz" );
 
     #ok(!$@, "should has no error - foo => bar is undefined");
 } "memleak test for simple get/set/delete test";
