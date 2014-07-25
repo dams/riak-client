@@ -1,6 +1,4 @@
-## no critic (RequireUseStrict, RequireUseWarnings)
 package Riak::Client;
-## use critic
 
 use 5.010;
 use Riak::Client::PBC;
