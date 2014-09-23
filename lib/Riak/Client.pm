@@ -75,13 +75,6 @@ use constant {
     no_auto_connect => 0,
   );
 
-  # AnyEvent mode
-  my $client = Riak::Client->new(
-    host => '127.0.0.1',
-    port => 8087
-    anyevent_mode => 1,
-  );
-
   $client->is_alive() or die "riak is not alive";
 
   # store hashref. will be serialized as JSON
@@ -103,9 +96,17 @@ use constant {
   $client->del( 'bucket_name', 'key_name');
 
   # AnyEvent mode
+  my $client = Riak::Client->new(
+    host => '127.0.0.1',
+    port => 8087
+    anyevent_mode => 1,
+  );
+
   my $cv = AE::cv
   $client->get_raw( 'bucket_name', 'key_name'
-                    sub { do_something_with($_[0]);
+                    sub { my ($value, $error) = @_;
+                          return $cv->croak($error) if $error;
+                          do_something_with($value);
                           $cv->send();
                     }
               );
@@ -206,7 +207,9 @@ instance will be synchronous.
 
 has anyevent_mode => ( is => 'ro', reader => 'ae', isa => Bool, default  => sub {0} );
 
-has _cv_connected => ( is => 'ro', lazy => 1, default => sub { AE::cv });
+#has _cv_connected => ( is => 'ro', lazy => 1, default => sub { AE::cv });
+has _on_connect_cb => ( is => 'rw' );
+
 has _requests_lock => ( is => 'rw', default => sub { undef });
 
 has _handle => ( is => 'ro', lazy => 1, builder => 1 );
@@ -221,22 +224,18 @@ sub _build__handle {
       connect  => [$host, $port],
       no_delay => $self->no_delay(),
       on_error => sub {
-        $_[0]->destroy; # explicitly destroy handle
-
-        _die_generic_error("on host $host:$port: $_[2]", $self->_current_request_ae_args->[0] // {});
-    },
-#      rtimeout => $self->read_timeout,
-#      wtimeout => $self->write_timeout,
-#      on_prepare => sub { $self->connection_timeout },
-      on_connect => sub { $self->_cv_connected->send },
-#      on_timeout => sub { print STDERR " ---- PLOP \n";},
+          $_[0]->destroy; # explicitly destroy handle
+          _die_generic_error("on host $host:$port: $_[2]", $self->_current_request_ae_args->[0] // {}, $self->_current_request_ae_args);
+      },
+      on_prepare => sub { $self->connection_timeout },
+      on_connect => sub { $self->_on_connect_cb()->() },
     );
 
 }
 
 
-# Why are we doing that ? It's because we want to avoid creating these closure
-# everytime we send or recerive data from the socket. So we build them here
+# Why are we doing that ? It's because we want to avoid creating these closures
+# everytime we send or receive data from the socket. So we build them here
 # once and for all. However the tricky part is that these callbacks need to
 # access $self and $args. So we make sure they can.
 has _current_request_ae_args => ( is => 'rw', default => sub { [] } );
@@ -250,8 +249,9 @@ sub _build__handle_reader_callback {
     my $inner_handle_reader_callback = sub {
         my ( $response_code, $response_body ) = unpack( 'c a*', $_[1] );
     
-        my $args = $self->_current_request_ae_args->[0]
-          or _die_generic_error( "Unexpected Response (got: $response_code, expected: nothing)", {} );
+        my $args_list = $self->_current_request_ae_args();
+        my $args = $args_list->[0]
+          or return _die_generic_error( "Unexpected Response (got: $response_code, expected: nothing)", {}, $args_list );
 
 
         # in case of error msg
@@ -259,15 +259,14 @@ sub _build__handle_reader_callback {
             my $decoded_message = RpbErrorResp->decode($response_body);
             my $errmsg  = $decoded_message->errmsg;
             my $errcode = $decoded_message->errcode;
-    
-            _die_generic_error( "Riak Error (code: $errcode) '$errmsg'", $args );
+            return _die_generic_error( "Riak Error (code: $errcode) '$errmsg'", $args, $args_list );
         }
     
         # check if we have what we want
-        $response_code != $args->{expected_code}
-          and _die_generic_error(
-                                 "Unexpected Response Code in (got: $response_code, expected: $args->{expected_code})",
-                                 $args );
+        if ($response_code != $args->{expected_code}) {
+            return _die_generic_error( "Unexpected Response Code in (got: $response_code, expected: $args->{expected_code})",
+                                       $args, $args_list );
+        }
     
         # default value if we don't need to handle the response.
         my ($ret, $more_to_come) = ( \1, undef);
@@ -282,7 +281,7 @@ sub _build__handle_reader_callback {
         # ok, single or multiple response are over, remove the current request
         # args, and remove the lock. This is done before last callback
         # execution, so that user can re-enqueue a request right away.
-        shift @{$self->_current_request_ae_args};
+        shift @$args_list;
         my $lock = $self->_requests_lock;
         $lock and $lock->send();
     
@@ -375,22 +374,59 @@ sub connect {
     my ( $self, $cb ) = $check->(@_);
 
     if ( ! $self->ae ) {
+        # that will perform connection
         $self->_socket();
         if ($cb) {
             $cb->();
+            return;
         } else {
             return 1;
         }
     } else {
 
-        $self->_handle();
-        if (my $cb = ref $_[-1] eq 'CODE' ? $_[-1] : undef) {
-            $self->_cv_connected->cb($cb);
-            return;
-        }
+        my $args_list = $self->_current_request_ae_args();
 
-        $self->_cv_connected->recv;
-        return 1;
+        # do we have a callback passed as parameter ?
+        if (my $cb = ref $_[-1] eq 'CODE' ? $_[-1] : undef) {
+            # if we have a callback, wrap it to shift args_list
+            $cb = sub { shift @$args_list; $cb->(@_) };
+            # set it so that the on_connect of _build__handle will call the cb
+            $self->_on_connect_cb($cb);
+            # add a pseudo request argument list, so that error message is
+            # descriptive, and _die_generic_error knows about the cb or cv
+            unshift @{$args_list},
+              { cb => $cb,
+                operation_name => 'connection',
+                bucket => 'none',
+                key => 'none',
+              };
+
+            # just build handle, and connect
+            $self->_handle();
+            return;
+
+        } else {
+
+            # if no callback, create a cv, we'll be synchronous later
+            my $cv = AE::cv;
+
+            unshift @{$args_list},
+              { cv => $cv,
+                operation_name => 'connection',
+                bucket => 'none',
+                key => 'none',
+              };
+
+            # we don't have a callback, use the cv and be synchronous. build
+            # handle, and connect
+            $self->_on_connect_cb(sub { $cv->send() });
+            $self->_handle();
+            # to make sure we cleanup args_list, *even* if $cv->croak() is called (by _die_generic_error for instance)
+            $cv->cb(sub { shift @$args_list });
+            $cv->recv;
+            
+            return 1;
+        }
     }
 
 }
@@ -398,13 +434,13 @@ sub connect {
 has _getkeys_accumulator => (is => 'rw', init_arg => undef);
 has _mapreduce_accumulator => (is => 'rw', init_arg => undef);
 
-=method ping
+=method ping $cb->($error)
 
  my $result = $client->ping();
- $client->ping($coderef);
+ $client->ping(sub { $error });
 
 Performs a ping operation. On error, will raise an exception. Accepts an
-optional callback, that will be executed upon completion
+optional callback (a CodeRef), that will be executed upon completion. 
 
   # example in AnyEvent mode
   $cv = AE::cv;
@@ -617,6 +653,7 @@ sub put_raw {
                            Optional[ArrayRef[Dict[bucket => Str, key => Str, tag => Str]]], # links
                           );
     my ( $self, $bucket, $key, $value, $content_type, $indexes, $links ) = $check->(@_);
+
     $content_type ||= 'plain/text';
     $self->_store( $bucket, $key, $value, $content_type, $indexes, $links, $cb);
 }
@@ -784,6 +821,7 @@ sub _fetch {
         handle_response => \&_handle_get_response,
         test_exist => $test_exist,
         cb => $cb,
+        cb_args => 1,
     } );
 }
 
@@ -791,7 +829,7 @@ sub _handle_get_response {
     my ( $self, $encoded_message, $args ) = @_;
 
     defined $encoded_message
-      or _die_generic_error( "Undefined Message", 'get', $args );
+      or return _die_generic_error( "Undefined Message", 'get', $args, $self->_current_request_ae_args );
 
     my $decoded_message = RpbGetResp->decode($encoded_message);
     my $content = $decoded_message->content;
@@ -1102,7 +1140,7 @@ sub _parse_response {
         my $response;
         # get and check response
         my $raw_response_ref = _read_response($socket)
-          or _die_generic_error( $! || "Socket Closed", $args);
+          or return _die_generic_error( $! || "Socket Closed", $args, $self->_current_request_ae_args);
 
         my ( $response_code, $response_body ) = unpack( 'c a*', $$raw_response_ref );
 
@@ -1112,15 +1150,15 @@ sub _parse_response {
             my $errmsg  = $decoded_message->errmsg;
             my $errcode = $decoded_message->errcode;
 
-            _die_generic_error( "Riak Error (code: $errcode) '$errmsg'", $args);
+            return _die_generic_error( "Riak Error (code: $errcode) '$errmsg'", $args, $self->_current_request_ae_args);
         }
 
 
         # check if we have what we want
         $response_code != $args->{expected_code}
-          and _die_generic_error(
+          and return _die_generic_error(
               "Unexpected Response Code in (got: $response_code, expected: $args->{expected_code})",
-              $args );
+              $args, $self->_current_request_ae_args );
     
         # default value if we don't need to handle the response.
         my ($ret, $more_to_come) = ( \1, undef);
@@ -1148,7 +1186,6 @@ sub _parse_response {
 
 sub _parse_response_ae {
     my ( $self, $args ) = @_;
-
 
     # OK so Riak doesn't support pipelining. That means that you can't send a
     # request before the previous one has returned. Especially true for
@@ -1204,13 +1241,14 @@ sub _parse_response_ae {
       return $$res;
 
     # $res was undef, that's an error here
-    _die_generic_error( "internal error: response handler returns <undef>, but not in callback mode",
-                               $args );
+    return _die_generic_error( "internal error: response handler returns <undef>, but not in callback mode",
+                               $args, $self->_current_request_ae_args );
 }
 
 sub _die_generic_error {
-    my ( $error, $args ) = @_;
+    my ( $error, $args, $args_list ) = @_;
 
+    shift @$args_list;
     my ($operation_name, $bucket, $key) =
       map { $args->{$_} // "<unknown $_>" } ( qw( operation_name bucket key) );
 
@@ -1219,11 +1257,15 @@ sub _die_generic_error {
       and $extra = "(bucket: $bucket, key: $key) ";
 
     my $msg = "Error in '$operation_name' $extra: $error";
-    if (my $cv = $args->{cv}) {
+    if ( my $cb = $args->{cb} ) {        
+        $cb->((undef) x ($args->{cb_nb_args} // 0), $msg);
+        return;
+    } elsif (my $cv = $args->{cv}) {
         $cv->croak($msg);
     } else {
         croak $msg;
     }
+    return;
 }
 
 sub _read_response {
