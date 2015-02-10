@@ -861,6 +861,10 @@ sub map_reduce {
 
 }
 
+=method map_reduce_raw
+
+=cut
+
 sub map_reduce_raw {
   state $check = compile(Any, Str, Str, Optional[CodeRef]);
   my ( $self, $request, $content_type, $cb) = $check->(@_);
