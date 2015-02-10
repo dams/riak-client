@@ -13,8 +13,6 @@ use Module::Runtime qw(use_module);
 require bytes;
 use Moo;
 
-use AnyEvent::Handle;
-
 use IO::Socket::INET;
 use IO::Socket::Timeout;
 
@@ -95,24 +93,6 @@ use constant {
   # delete data
   $client->del( 'bucket_name', 'key_name');
 
-  # AnyEvent mode
-  my $client = Riak::Client->new(
-    host => '127.0.0.1',
-    port => 8087
-    anyevent_mode => 1,
-  );
-
-  my $cv = AE::cv
-  $client->get_raw( 'bucket_name', 'key_name'
-                    sub { my ($value, $error) = @_;
-                          return $cv->croak($error) if $error;
-                          do_something_with($value);
-                          $cv->send();
-                    }
-              );
-  # ... later one
-  $cv->recv();
-
   # list keys in stream
   $client->get_keys(foo => sub{
      my ($key, $done) = @_;
@@ -121,24 +101,16 @@ use constant {
      $another_client->del(foo => $key);
 
   });
-  
+
 =head1 DESCRIPTION
 
-Riak::Client is a fast and light Perl client for Riak using PBC interface, with
-optional AnyEvent mode.
+Riak::Client is a fast and light Perl client for Riak using PBC interface
 
 It supports operations like ping, get, exists, put, del, secondary indexes
 (so-called 2i) setting and querying, and Map Reduce querying.
 
-It has two modes, a traditional procedural mode, and an event based mode, using
-AnyEvent.
-
 It started as a fork of C<Riak::Light> to fix some bugs, but actually ended up
 in a complete rewrite with more features, but the same performance.
-
-=attr anyevent_mode
-
-Enables the AnyEvent mode, allowing true asynchronous mode.
 
 =attr host
 
@@ -195,119 +167,9 @@ Instead, you'll have to call C<connect()> yourself.
 
 has no_auto_connect => ( is => 'ro', isa => Bool,  default  => sub {0} );
 
-=attr anyevent_mode
-
-Bool, Default 0. If set to true, then all methods can receive a callback,
-as last argument. If present, the method will return immediately, and the
-callback will be executed upon completion of the operation, receiving a condvar
-as first and only argument. If set to false (the default), then the client
-instance will be synchronous.
-
-=cut
-
-has anyevent_mode => ( is => 'ro', reader => 'ae', isa => Bool, default  => sub {0} );
-
-#has _cv_connected => ( is => 'ro', lazy => 1, default => sub { AE::cv });
 has _on_connect_cb => ( is => 'rw' );
 
 has _requests_lock => ( is => 'rw', default => sub { undef });
-
-has _handle => ( is => 'ro', lazy => 1, builder => 1 );
-sub _build__handle {
-    my ($self) = @_;
-    my ($host, $port) = ($self->host, $self->port);
-
-    weaken $self;
-
-    # TODO = timeouts
-    AnyEvent::Handle->new (
-      connect  => [$host, $port],
-      no_delay => $self->no_delay(),
-      on_error => sub {
-          $_[0]->destroy; # explicitly destroy handle
-          _die_generic_error("on host $host:$port: $_[2]", $self->_current_request_ae_args->[0] // {}, $self->_current_request_ae_args);
-      },
-      on_prepare => sub { $self->connection_timeout },
-      on_connect => sub { $self->_on_connect_cb()->() },
-    );
-
-}
-
-
-# Why are we doing that ? It's because we want to avoid creating these closures
-# everytime we send or receive data from the socket. So we build them here
-# once and for all. However the tricky part is that these callbacks need to
-# access $self and $args. So we make sure they can.
-has _current_request_ae_args => ( is => 'rw', default => sub { [] } );
-has _handle_reader_callback => ( is => 'ro', lazy => 1, builder => 1 );
-sub _build__handle_reader_callback {
-    my ($self) = @_;
-    weaken $self;
-
-    my $handle_reader_callback_weak;
-
-    my $inner_handle_reader_callback = sub {
-        my ( $response_code, $response_body ) = unpack( 'c a*', $_[1] );
-    
-        my $args_list = $self->_current_request_ae_args();
-        my $args = $args_list->[0]
-          or return _die_generic_error( "Unexpected Response (got: $response_code, expected: nothing)", {}, $args_list );
-
-
-        # in case of error msg
-        if ($response_code == ERROR_RESPONSE_CODE) {
-            my $decoded_message = RpbErrorResp->decode($response_body);
-            my $errmsg  = $decoded_message->errmsg;
-            my $errcode = $decoded_message->errcode;
-            return _die_generic_error( "Riak Error (code: $errcode) '$errmsg'", $args, $args_list );
-        }
-    
-        # check if we have what we want
-        if ($response_code != $args->{expected_code}) {
-            return _die_generic_error( "Unexpected Response Code in (got: $response_code, expected: $args->{expected_code})",
-                                       $args, $args_list );
-        }
-    
-        # default value if we don't need to handle the response.
-        my ($ret, $more_to_come) = ( \1, undef);
-        # remember, $handle_response may or may not use $args->{cb}
-        if (my $handle_response = $args->{handle_response}) {
-            ($ret, $more_to_come) = $handle_response->( $self, $response_body, $args );
-        }
-        # if we expect more to come, re-prepend the handler
-        $more_to_come and $_[0]->unshift_read( chunk => 4, $handle_reader_callback_weak),
-          return;
-    
-        # ok, single or multiple response are over, remove the current request
-        # args, and remove the lock. This is done before last callback
-        # execution, so that user can re-enqueue a request right away.
-        shift @$args_list;
-        my $lock = $self->_requests_lock;
-        $lock and $lock->send();
-    
-        # if no user callback provided, use the $cv and return.
-        !$args->{cb}
-          and $args->{cv}->send($ret),
-          return;
-    
-        # If $ret is undef, means everything has been processed and
-        # callback called in $handle_response, nothing left to do.
-        # Otherwise, we have a result, call the callback on it
-        $ret and $args->{cb}->($$ret);
-    
-    };
-
-    my $handle_reader_callback = sub {
-        # length arrived, decode
-        my $len = unpack "N", $_[1];
-        # now read the payload
-        $_[0]->unshift_read( chunk => $len, $inner_handle_reader_callback);
-    };
-
-    $handle_reader_callback_weak = $handle_reader_callback;
-    weaken $handle_reader_callback_weak;
-    $handle_reader_callback;
-}
 
 has _socket => ( is => 'ro', lazy => 1, builder => 1 );
 sub _build__socket {
@@ -361,72 +223,19 @@ automatically done when C<new()> is called, unless the C<no_auto_connect>
 attribute is set to true. Accepts an optional callback, that will be executed
 when connected.
 
-  # example in AnyEvent mode
-  $cv = AE::cv;
-  $client->connect(sub { print "connected!\n"; $cv->send(); });
-  # ...
-  $cv->recv();
-
 =cut
 
 sub connect {
     state $check = compile(Any, Optional[CodeRef]);
     my ( $self, $cb ) = $check->(@_);
 
-    if ( ! $self->ae ) {
-        # that will perform connection
-        $self->_socket();
-        if ($cb) {
-            $cb->();
-            return;
-        } else {
-            return 1;
-        }
+    # that will perform connection
+    $self->_socket();
+    if ($cb) {
+        $cb->();
+        return;
     } else {
-
-        my $args_list = $self->_current_request_ae_args();
-
-        # do we have a callback passed as parameter ?
-        if (my $cb = ref $_[-1] eq 'CODE' ? $_[-1] : undef) {
-            # if we have a callback, wrap it to shift args_list
-            $cb = sub { shift @$args_list; $cb->(@_) };
-            # set it so that the on_connect of _build__handle will call the cb
-            $self->_on_connect_cb($cb);
-            # add a pseudo request argument list, so that error message is
-            # descriptive, and _die_generic_error knows about the cb or cv
-            unshift @{$args_list},
-              { cb => $cb,
-                operation_name => 'connection',
-                bucket => 'none',
-                key => 'none',
-              };
-
-            # just build handle, and connect
-            $self->_handle();
-            return;
-
-        } else {
-
-            # if no callback, create a cv, we'll be synchronous later
-            my $cv = AE::cv;
-
-            unshift @{$args_list},
-              { cv => $cv,
-                operation_name => 'connection',
-                bucket => 'none',
-                key => 'none',
-              };
-
-            # we don't have a callback, use the cv and be synchronous. build
-            # handle, and connect
-            $self->_on_connect_cb(sub { $cv->send() });
-            $self->_handle();
-            # to make sure we cleanup args_list, *even* if $cv->croak() is called (by _die_generic_error for instance)
-            $cv->cb(sub { shift @$args_list });
-            $cv->recv;
-            
-            return 1;
-        }
+        return 1;
     }
 
 }
@@ -434,19 +243,13 @@ sub connect {
 has _getkeys_accumulator => (is => 'rw', init_arg => undef);
 has _mapreduce_accumulator => (is => 'rw', init_arg => undef);
 
-=method ping $cb->($error)
+=method ping( [$cb->()] )
 
  my $result = $client->ping();
- $client->ping(sub { $error });
+ $client->ping(sub { print "ping successful\n" });
 
 Performs a ping operation. On error, will raise an exception. Accepts an
 optional callback (a CodeRef), that will be executed upon completion. 
-
-  # example in AnyEvent mode
-  $cv = AE::cv;
-  $client->ping(sub { print "got $_[0] \n"; $cv->send(); });
-  # ...
-  $cv->recv();
 
   # an other example
   use Try::Tiny;
@@ -468,20 +271,14 @@ sub ping {
     } );
 }
 
-=method is_alive
+=method is_alive( [$cb->($bool)] )
 
  my $is_alive = $client->is_alive();
  $client->is_alive($coderef);
 
 Checks if the connection is alive. Returns true or false. On error, will raise
 an exception. Accepts an optional callback, that will be executed upon
-completion. Even in AnyEvent mode, this operation is synchronous.
-
-  # example in AnyEvent mode
-  $cv = AE::cv;
-  $client->is_alive(sub { print($_[0] ? "alive\n" : "dead\n"); $cv->send(); });
-  # ...
-  $cv->recv();
+completion.
 
 =cut
 
@@ -493,16 +290,10 @@ sub is_alive {
     return $res;
 }
 
-=method get
+=method get( $bucket, $key, [$cb->($value)] )
 
   my $value = $client->get($bucket, $key);
   $client->get($bucket, $key, $coderef);
-
-  # example in AnyEvent mode
-  $cv = AE::cv;
-  $client->get('bucket', 'key', sub { do_stuff_with_value($_[0]); $cv->send() });
-  # ...
-  $cv->recv();
 
 Performs a fetch operation. Expects bucket and key names. Returns the value. On
 error, will raise an exception. Accepts an optional callback, that will be
@@ -518,7 +309,7 @@ sub get {
     $self->_fetch( $bucket, $key, 1, 0, $cb );
 }
 
-=method get_raw
+=method get_raw( $bucket, $key, [$cb->($value)] )
 
   my $value = $client->get_raw($bucket, $key);
   $client->get_raw($bucket, $key, $coderef);
@@ -534,7 +325,7 @@ sub get_raw {
     $self->_fetch( $bucket, $key, 0, 0, $cb );
 }
 
-=method put
+=method put( $bucket, $key, $value, [ $mime_type, $secondary_indexes, $links ], [ $cb->($value) ] )
 
   $client->put($bucket, $key, $value);
   $client->put($bucket, $key, $value, $coderef);
@@ -558,7 +349,7 @@ To query secondary indexes, see C<query_index>.
 
 
   $client->put('bucket', 'key', { some_values => [1,2,3] });
-  $client->put('bucket', 'key', { some_values => [1,2,3] }, 'application/json);
+  $client->put('bucket', 'key', { some_values => [1,2,3] }, 'application/json');
   $client->put('bucket', 'key', 'text', 'plain/text');
 
   # you can set secondary indexes (2i)
@@ -590,17 +381,6 @@ To query secondary indexes, see C<query_index>.
                 ],
               );
 
-  # example in AnyEvent mode
-  $cv = AE::cv;
-  $client->put( 'bucket', 'key', 'some_text', 'plain/text',
-                { field1_bin => 'abc', field2_int => 42 },
-                { next_key => 'bucket2/foo'},
-                sub { print "data is sent to Riak\n"; $cv->send() },
-              );
-  # ...
-  $cv->recv();
-
-
 =cut
 
 #my $LinksStructure = declare as ArrayRef[Dict[bucket => Str, key => Str, tag => Str]];
@@ -622,7 +402,7 @@ sub put {
 }
 
 
-=method put_raw
+=method put_raw ( $bucket, $key, $value, [ $mime_type, $secondary_indexes, $links ], [ $cb->($value) ] )
 
   $client->put_raw('bucket', 'key', encode_json({ some_values => [1,2,3] }), 'application/json');
   $client->put_raw('bucket', 'key', 'text');
@@ -658,7 +438,7 @@ sub put_raw {
     $self->_store( $bucket, $key, $value, $content_type, $indexes, $links, $cb);
 }
 
-=method del
+=method del ( $bucket, $key, [ $cb->() ] )
 
   $client->del(bucket => key);
 
@@ -688,7 +468,7 @@ sub del {
     } );
 }
 
-=method get_keys
+=method get_keys( $bucket, $cb->($key, $bool) )
 
   # in default mode
   $client->get_keys(foo => sub{
@@ -696,15 +476,6 @@ sub del {
      # you should use another client inside this callback!
      $another_client->del(foo => $key);
   });
-
-  # in anyevent mode
-  my $cv = AE::cv;
-  $client->get_keys(foo => sub{
-     my ($key, $done) = @_;
-     # ... do stuff with $key
-     $done and $cv->send;
-  });
-  $cv->recv();
 
 B<WARNING>, this method should not be called on a production Riak cluster, as
 it can have a big performance impact. See Riak's documentation.
@@ -714,11 +485,11 @@ C<Riak::Client> instance inside the callback, it would raise an exception.
 
 Perform a list keys operation. Receive a callback and will call it for each
 key. The callback will receive two arguments: the key, and a boolean indicating
-if it's the last key
+if it's the last key.
 
-The callback is optional, in which case an ArrayRef of B<all> the keys are
-returned. But don't do that, and always provide a callback, to avoid your RAM
-usage to skyrocket...
+The callback is optional. If not provided C<get_keys()> will return an ArrayRef
+of B<all> the keys. Don't do that, and always provide a callback, to avoid your
+RAM usage to skyrocket...
 
 =cut
 
@@ -784,7 +555,7 @@ sub _handle_get_keys_response {
     return;
 }
 
-=method exists
+=method exists($bucket, $key, [ $cb->($bool) ] )
 
   $client->exists(bucket => 'key') or warn "key not found";
   
@@ -829,7 +600,7 @@ sub _handle_get_response {
     my ( $self, $encoded_message, $args ) = @_;
 
     defined $encoded_message
-      or return _die_generic_error( "Undefined Message", 'get', $args, $self->_current_request_ae_args );
+      or return _die_generic_error( "Undefined Message", 'get', $args );
 
     my $decoded_message = RpbGetResp->decode($encoded_message);
     my $content = $decoded_message->content;
@@ -887,12 +658,12 @@ sub _store {
     } );
 }
 
-=method query_index
+=method query_index( $bucket, $index, $value, [ $cb->($key) ] )
 
 Perform a secondary index (2i) query. Expects a bucket name, the index field
 name, the index value you're searching on, and optionally a callback.
 
-If a callback has been provided, doesn't return anything, but execute the
+If a callback has been provided, doesn't return anything, but executes the
 callback on each matching keys. callback will receive the key name as first
 argument. key name will also be in C<$_>. If no callback is provided, returns
 and ArrayRef of matching keys.
@@ -966,7 +737,7 @@ sub _handle_query_index_response {
 
 }
 
-=method get_buckets
+=method get_buckets( [ $cb->($buckets) ] )
 
 B<WARNING>, this method should not be called on a production Riak cluster, as
 it can have a big performance impact. See Riak's documentation.
@@ -992,7 +763,7 @@ sub _handle_get_buckets_response {
     return \($obj->buckets // []);
 }
 
-=method get_bucket_props
+=method get_bucket_props($bucket, [ $cb->($properties) ] )
 
 
 =cut
@@ -1020,7 +791,7 @@ sub _handle_get_bucket_props_response {
     return \{ %$props }; # unblessing variable
 }
 
-=method set_bucket_props
+=method set_bucket_props($bucket, $properties)
 
 
 =cut
@@ -1044,6 +815,36 @@ sub set_bucket_props {
 
 =method map_reduce
 
+Perform a map/reduce operation.
+
+  # using a javascript function
+  my $json_hash = {
+      inputs => 'training',
+      query => [{
+        map => {
+          language =>"javascript",
+          source =>"function(riakObject) {
+            var val = riakObject.values[0].data.match(/pizza/g);
+            return [[riakObject.key, (val ? val.length : 0 )]];
+          }"
+        }
+      }]
+  };
+
+  # using an erlang function
+  my $json_hash = {
+      inputs => 'messages',
+      query => [{
+        map => {
+          language => 'erlang',
+          module => 'mr_example',
+          function => 'get_keys'
+        }
+      }]
+  };
+
+  $client->map_reduce($json_hash, sub { ... });
+
 =cut
 
 sub map_reduce {
@@ -1059,10 +860,6 @@ sub map_reduce {
   map_reduce_raw($self, @args);
 
 }
-
-=method map_reduce_raw
-
-=cut
 
 sub map_reduce_raw {
   state $check = compile(Any, Str, Str, Optional[CodeRef]);
@@ -1130,9 +927,6 @@ sub _handle_map_reduce_response {
 sub _parse_response {
     my ( $self, $args ) = @_;
 
-    $self->ae
-      and goto &_parse_response_ae;
-
     my $socket = $self->_socket;
     _send_bytes($socket, $args->{request_code}, $args->{body_ref} // \'');
 
@@ -1140,7 +934,7 @@ sub _parse_response {
         my $response;
         # get and check response
         my $raw_response_ref = _read_response($socket)
-          or return _die_generic_error( $! || "Socket Closed", $args, $self->_current_request_ae_args);
+          or return _die_generic_error( $! || "Socket Closed", $args);
 
         my ( $response_code, $response_body ) = unpack( 'c a*', $$raw_response_ref );
 
@@ -1150,7 +944,7 @@ sub _parse_response {
             my $errmsg  = $decoded_message->errmsg;
             my $errcode = $decoded_message->errcode;
 
-            return _die_generic_error( "Riak Error (code: $errcode) '$errmsg'", $args, $self->_current_request_ae_args);
+            return _die_generic_error( "Riak Error (code: $errcode) '$errmsg'", $args);
         }
 
 
@@ -1158,7 +952,7 @@ sub _parse_response {
         $response_code != $args->{expected_code}
           and return _die_generic_error(
               "Unexpected Response Code in (got: $response_code, expected: $args->{expected_code})",
-              $args, $self->_current_request_ae_args );
+              $args );
     
         # default value if we don't need to handle the response.
         my ($ret, $more_to_come) = ( \1, undef);
@@ -1184,71 +978,9 @@ sub _parse_response {
     }
 }
 
-sub _parse_response_ae {
-    my ( $self, $args ) = @_;
-
-    # OK so Riak doesn't support pipelining. That means that you can't send a
-    # request before the previous one has returned. Especially true for
-    # multiple response requests, like get_keys. So we need a way to detect
-    # that a running request is occuring, and we can't push_read before the
-    # previous request is done.
-
-    # if there is a lock on the requests
-    if ($self->_requests_lock) {
-        # wait to acquire lock
-        $self->_requests_lock->recv();
-        # delete the lock
-        $self->_requests_lock(undef);
-    }
-
-    # if this request can have multiple responses, set the lock.
-    $args->{lock_requests}
-      and $self->_requests_lock(AE::cv);
-
-    my $body_ref     = $args->{body_ref} // \'';
-    
-    $self->_handle->push_write(pack('N',
-          bytes::length($$body_ref) + 1)
-        . pack('c', $args->{request_code}) . $$body_ref
-    );
-
-    # maybe we'll use a cv to force synchronous call
-    my $cv;
-    # if we don't have a user callback, we need to be synchronous, create the cv.
-    $args->{cb}
-      or $cv = AE::cv;
-
-    # Store the cv also in the args so that the callback can get access to it
-    $args->{cv} = $cv;
-
-    # Finally, store the given args to be reacheble from $self, so that
-    # _handle_reader_callback can get it. We push it in our stack, because we
-    # can stack up multiple requests, and get the response only after that.
-    # However we have the guarantee from AnyEvent and Riak that we will get the
-    # answers in order (for a given Riak connection, that is, for a given
-    # $self).
-    push @{$self->_current_request_ae_args()}, $args;
-
-    # OK, now try to read from the socket with the handler
-    $self->_handle->push_read( chunk => 4, $self->_handle_reader_callback);
-
-    # we were given a user callback, don't be synchronous, immediately return.
-    $args->{cb} and return;
-
-    # no user callback, let's be synchronous
-    my $res = $cv->recv();
-    $res and
-      return $$res;
-
-    # $res was undef, that's an error here
-    return _die_generic_error( "internal error: response handler returns <undef>, but not in callback mode",
-                               $args, $self->_current_request_ae_args );
-}
-
 sub _die_generic_error {
-    my ( $error, $args, $args_list ) = @_;
+    my ( $error, $args ) = @_;
 
-    shift @$args_list;
     my ($operation_name, $bucket, $key) =
       map { $args->{$_} // "<unknown $_>" } ( qw( operation_name bucket key) );
 
@@ -1334,34 +1066,28 @@ sub _send_bytes {
 
 Note: These benchmarks are the one provided by C<Riak::Light>.
 
-Note: the AnyEvent mode is a bit slower below, because we are forcing
-synchronous mode, even in AnyEvent, so the benchmark is paying the price of
-having AnyEvent enabled but not used.
-
 =head2 GETS
 
-                                  Rate Data::Riak (REST) Riak::Tiny (REST) Net::Riak (REST) Data::Riak::Fast (REST) Net::Riak (PBC) Riak::Client (PBC + AnyEvent) Riak::Light (PBC) Riak::Client (PBC)
-  Data::Riak (REST)              427/s                --              -30%             -31%                    -43%            -65%                          -85%              -90%               -91%
-  Riak::Tiny (REST)              611/s               43%                --              -2%                    -19%            -51%                          -79%              -86%               -87%
-  Net::Riak (REST)               623/s               46%                2%               --                    -17%            -50%                          -78%              -86%               -87%
-  Data::Riak::Fast (REST)        755/s               77%               24%              21%                      --            -39%                          -74%              -83%               -84%
-  Net::Riak (PBC)               1238/s              190%              103%              99%                     64%              --                          -57%              -72%               -74%
-  Riak::Client (PBC + AnyEvent) 2878/s              573%              371%             362%                    281%            132%                            --              -34%               -39%
-  Riak::Light (PBC)             4348/s              917%              612%             598%                    476%            251%                           51%                --                -8%
-  Riak::Client (PBC)            4706/s             1001%              671%             655%                    524%            280%                           64%                8%                 --
+                                  Rate Data::Riak (REST) Riak::Tiny (REST) Net::Riak (REST) Data::Riak::Fast (REST) Net::Riak (PBC) Riak::Client Riak::Light (PBC) Riak::Client (PBC)
+  Data::Riak (REST)              427/s                --              -30%             -31%                    -43%            -65%                           -90%               -91%
+  Riak::Tiny (REST)              611/s               43%                --              -2%                    -19%            -51%                           -86%               -87%
+  Net::Riak (REST)               623/s               46%                2%               --                    -17%            -50%                           -86%               -87%
+  Data::Riak::Fast (REST)        755/s               77%               24%              21%                      --            -39%                           -83%               -84%
+  Net::Riak (PBC)               1238/s              190%              103%              99%                     64%              --                           -72%               -74%
+  Riak::Light (PBC)             4348/s              917%              612%             598%                    476%            251%                             --                -8%
+  Riak::Client (PBC)            4706/s             1001%              671%             655%                    524%            280%                             8%                 --
 
 
 =head2 PUTS
 
-                                  Rate Net::Riak (REST) Data::Riak (REST) Riak::Tiny (REST) Data::Riak::Fast (REST) Net::Riak (PBC) Riak::Light (PBC) Riak::Client (PBC + AnyEvent) Riak::Client (PBC)
-  Net::Riak (REST)               542/s               --              -15%              -29%                    -55%            -57%              -90%                          -92%               -92%
-  Data::Riak (REST)              635/s              17%                --              -17%                    -47%            -49%              -89%                          -90%               -90%
-  Riak::Tiny (REST)              765/s              41%               20%                --                    -36%            -39%              -86%                          -88%               -88%
-  Data::Riak::Fast (REST)       1198/s             121%               89%               57%                      --             -4%              -79%                          -82%               -82%
-  Net::Riak (PBC)               1254/s             131%               97%               64%                      5%              --              -78%                          -81%               -81%
-  Riak::Light (PBC)             5634/s             939%              787%              637%                    370%            349%                --                          -14%               -14%
-  Riak::Client (PBC + AnyEvent) 6557/s            1110%              933%              757%                    448%            423%               16%                            --                 0%
-  Riak::Client (PBC)            6557/s            1110%              933%              757%                    448%            423%               16%                            0%                 --
+                                  Rate Net::Riak (REST) Data::Riak (REST) Riak::Tiny (REST) Data::Riak::Fast (REST) Net::Riak (PBC) Riak::Light (PBC) Riak::Client (PBC)
+  Net::Riak (REST)               542/s               --              -15%              -29%                    -55%            -57%              -90%               -92%
+  Data::Riak (REST)              635/s              17%                --              -17%                    -47%            -49%              -89%               -90%
+  Riak::Tiny (REST)              765/s              41%               20%                --                    -36%            -39%              -86%               -88%
+  Data::Riak::Fast (REST)       1198/s             121%               89%               57%                      --             -4%              -79%               -82%
+  Net::Riak (PBC)               1254/s             131%               97%               64%                      5%              --              -78%               -81%
+  Riak::Light (PBC)             5634/s             939%              787%              637%                    370%            349%                --               -14%
+  Riak::Client (PBC)            6557/s            1110%              933%              757%                    448%            423%               16%                 --
 
 
 =for Pod::Coverage BUILD
@@ -1377,8 +1103,6 @@ L<Data::Riak::Fast>
 L<Action::Retry>
 
 L<Riak::Light>
-
-L<AnyEvent>
 
 =head1 CONTRIBUTORS
   

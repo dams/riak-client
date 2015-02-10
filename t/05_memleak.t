@@ -14,30 +14,11 @@ use Riak::Client;
 
 use Test::LeakTrace;
 
-my @modes = (
-             [ 'standard nocb', 0 ],
-             [ 'standard cb', 1 ],
-             [ 'AE nocb', 0, anyevent_mode => 1 ],
-             [ 'AE cb', 1, anyevent_mode => 1 ],
-           );
-
-#plan tests => 6 * scalar(@modes);
-
 my ( $host, $port ) = split ':', $ENV{RIAK_PBC_HOST};
 
 
-foreach ( @modes ) {
-
-my ($mode, $cb, @additional_options) = @$_;
-
-diag "";
-diag "";
-diag "MODE: $mode";
-diag "";
-
 no_leaks_ok {
     my $client = Riak::Client->new(
-        @additional_options,
         host => $host,
         port => $port,
         no_auto_connect => 1,
@@ -50,7 +31,6 @@ no_leaks_ok {
     my ( $host, $port ) = split ':', $ENV{RIAK_PBC_HOST};
 
     my $client = Riak::Client->new(
-        @additional_options,
         host => $host, port => $port,
     );
 
@@ -59,31 +39,18 @@ no_leaks_ok {
 
     # make sure we run stuff with callbacks as well
     
-    $cb ?         $client->ping(                            sub { "can ping" } )
-      :           $client->ping();
-    $cb ?         $client->is_alive(                        sub { "is_alive" } )
-      :           $client->is_alive();
-    $cb ?         $client->put(     foo => "bar", $hash,    sub { "store hashref" } )
-      :           $client->put(     foo => "bar", $hash );
-    $cb ?         $client->get(     foo => 'bar',           sub { "fetch hashref" } )
-      :           $client->get(     foo => 'bar' );
-    $cb ?         $client->put_raw( foo => "bar2", $scalar, sub { "store raw scalar" } )
-      :           $client->put_raw( foo => "bar2", $scalar );
-    $cb ?         $client->get_raw( foo => 'bar2',          sub { "fetch raw scalar" } )
-      :           $client->get_raw( foo => 'bar2' );
-    $cb ?         $client->exists(  foo => 'bar',           sub { "should exists" } )
-      :           $client->exists(  foo => 'bar' );
-    $cb ?         $client->del(     foo => 'bar',           sub { "delete hashref" } )
-      :           $client->del(     foo => 'bar' );
-    $cb ?         $client->get(     foo => 'bar',           sub { "fetches nothing" } )
-      :           $client->get(     foo => 'bar' );
+    $client->ping();
+    $client->is_alive();    $client->get(     foo => 'bar' );
+    $client->put_raw( foo => "bar2", $scalar );
+    $client->get_raw( foo => 'bar2' );
+    $client->exists(  foo => 'bar' );
+    $client->del(     foo => 'bar' );
+    $client->get(     foo => 'bar' );
 
     $client->exists( foo => 'bar' );
 
     $client->put( foo => "baz", 'TEXT', 'plain/text' );
-    $client->get( foo => "baz" );
-
-    #ok(!$@, "should has no error - foo => bar is undefined");
+    $client->get( foo => "baz" );    #ok(!$@, "should has no error - foo => bar is undefined");
 } "memleak test for simple get/set/delete test";
 
 
@@ -96,7 +63,6 @@ no_leaks_ok {
     my ( $host, $port ) = split ':', $ENV{RIAK_PBC_HOST};
 
     my $client = Riak::Client->new(
-        @additional_options,
         host => $host, port => $port,
     );
 
@@ -120,10 +86,6 @@ no_leaks_ok {
 
 } "memleak test for get keys";
 
-done:
-
-}
-
 done_testing;
 
 END { _cleanup('foo'); }
@@ -131,7 +93,7 @@ END { _cleanup('foo'); }
 sub _cleanup {
     my @buckets_to_cleanup = @_;
 
-    diag "cleaning up...";
+    diag "\ncleaning up...";
     my $client = Riak::Client->new(
         host => $host, port => $port,
     );

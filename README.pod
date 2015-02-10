@@ -8,7 +8,7 @@ Riak::Client - Fast and lightweight Perl client for Riak
 
 =head1 VERSION
 
-version 1.91
+version 1.95
 
 =head1 SYNOPSIS
 
@@ -25,13 +25,6 @@ version 1.91
     read_timeout => 5,
     write_timeout => 5,
     no_auto_connect => 0,
-  );
-
-  # AnyEvent mode
-  my $client = Riak::Client->new(
-    host => '127.0.0.1',
-    port => 8087
-    anyevent_mode => 1,
   );
 
   $client->is_alive() or die "riak is not alive";
@@ -54,16 +47,6 @@ version 1.91
   # delete data
   $client->del( 'bucket_name', 'key_name');
 
-  # AnyEvent mode
-  my $cv = AE::cv
-  $client->get_raw( 'bucket_name', 'key_name'
-                    sub { do_something_with($_[0]);
-                          $cv->send();
-                    }
-              );
-  # ... later one
-  $cv->recv();
-
   # list keys in stream
   $client->get_keys(foo => sub{
      my ($key, $done) = @_;
@@ -72,24 +55,18 @@ version 1.91
      $another_client->del(foo => $key);
 
   });
-  
+
 =head1 DESCRIPTION
 
-Riak::Client is a fast and light Perl client for Riak using PBC interface, with
-optional AnyEvent mode.
+Riak::Client is a fast and light Perl client for Riak using PBC interface
 
 It supports operations like ping, get, exists, put, del, secondary indexes
 (so-called 2i) setting and querying, and Map Reduce querying.
 
-It has two modes, a traditional procedural mode, and an event based mode, using
-AnyEvent.
-
 It started as a fork of C<Riak::Light> to fix some bugs, but actually ended up
 in a complete rewrite with more features, but the same performance.
 
-=head2 anyevent_mode
-
-Enables the AnyEvent mode, allowing true asynchronous mode.
+=head1 ATTRIBUTES
 
 =head2 host
 
@@ -130,13 +107,7 @@ you're doing.
 Bool, Default 0. If set to true, then the module won't automatically connect upon instanciation.
 Instead, you'll have to call C<connect()> yourself.
 
-=head2 anyevent_mode
-
-Bool, Default 0. If set to true, then all methods can receive a callback,
-as last argument. If present, the method will return immediately, and the
-callback will be executed upon completion of the operation, receiving a condvar
-as first and only argument. If set to false (the default), then the client
-instance will be synchronous.
+=head1 METHODS
 
 =head2 connect
 
@@ -148,25 +119,13 @@ automatically done when C<new()> is called, unless the C<no_auto_connect>
 attribute is set to true. Accepts an optional callback, that will be executed
 when connected.
 
-  # example in AnyEvent mode
-  $cv = AE::cv;
-  $client->connect(sub { print "connected!\n"; $cv->send(); });
-  # ...
-  $cv->recv();
-
-=head2 ping
+=head2 ping( [$cb->()] )
 
  my $result = $client->ping();
- $client->ping($coderef);
+ $client->ping(sub { print "ping successful\n" });
 
 Performs a ping operation. On error, will raise an exception. Accepts an
-optional callback, that will be executed upon completion
-
-  # example in AnyEvent mode
-  $cv = AE::cv;
-  $client->ping(sub { print "got $_[0] \n"; $cv->send(); });
-  # ...
-  $cv->recv();
+optional callback (a CodeRef), that will be executed upon completion. 
 
   # an other example
   use Try::Tiny;
@@ -174,31 +133,19 @@ optional callback, that will be executed upon completion
 
 See also C<is_alive()>.
 
-=head2 is_alive
+=head2 is_alive( [$cb->($bool)] )
 
  my $is_alive = $client->is_alive();
  $client->is_alive($coderef);
 
 Checks if the connection is alive. Returns true or false. On error, will raise
 an exception. Accepts an optional callback, that will be executed upon
-completion. Even in AnyEvent mode, this operation is synchronous.
+completion.
 
-  # example in AnyEvent mode
-  $cv = AE::cv;
-  $client->is_alive(sub { print($_[0] ? "alive\n" : "dead\n"); $cv->send(); });
-  # ...
-  $cv->recv();
-
-=head2 get
+=head2 get( $bucket, $key, [$cb->($value)] )
 
   my $value = $client->get($bucket, $key);
   $client->get($bucket, $key, $coderef);
-
-  # example in AnyEvent mode
-  $cv = AE::cv;
-  $client->get('bucket', 'key', sub { do_stuff_with_value($_[0]); $cv->send() });
-  # ...
-  $cv->recv();
 
 Performs a fetch operation. Expects bucket and key names. Returns the value. On
 error, will raise an exception. Accepts an optional callback, that will be
@@ -206,7 +153,7 @@ called upon completion, with the value as first argument. If the content_type
 of the fetched value is C<'application/json'>, automatically decodes the JSON
 into a Perl structure. If you need the raw data you can use C<get_raw>.
 
-=head2 get_raw
+=head2 get_raw( $bucket, $key, [$cb->($value)] )
 
   my $value = $client->get_raw($bucket, $key);
   $client->get_raw($bucket, $key, $coderef);
@@ -214,7 +161,7 @@ into a Perl structure. If you need the raw data you can use C<get_raw>.
 Same as C<get>, but no automatic JSON decoding will be performed. If you want
 JSON to be automatically decoded, you should use C<get()> instead.
 
-=head2 put
+=head2 put( $bucket, $key, $value, [ $mime_type, $secondary_indexes, $links ], [ $cb->($value) ] )
 
   $client->put($bucket, $key, $value);
   $client->put($bucket, $key, $value, $coderef);
@@ -236,9 +183,8 @@ C<_bin>, depending if the index type is integer or binary.
 
 To query secondary indexes, see C<query_index>.
 
-
   $client->put('bucket', 'key', { some_values => [1,2,3] });
-  $client->put('bucket', 'key', { some_values => [1,2,3] }, 'application/json);
+  $client->put('bucket', 'key', { some_values => [1,2,3] }, 'application/json');
   $client->put('bucket', 'key', 'text', 'plain/text');
 
   # you can set secondary indexes (2i)
@@ -270,18 +216,7 @@ To query secondary indexes, see C<query_index>.
                 ],
               );
 
-  # example in AnyEvent mode
-  $cv = AE::cv;
-  $client->put( 'bucket', 'key', 'some_text', 'plain/text',
-                { field1_bin => 'abc', field2_int => 42 },
-                { next_key => 'bucket2/foo'},
-                sub { print "data is sent to Riak\n"; $cv->send() },
-              );
-  # ...
-  $cv->recv();
-
-
-=head2 put_raw
+=head2 put_raw ( $bucket, $key, $value, [ $mime_type, $secondary_indexes, $links ], [ $cb->($value) ] )
 
   $client->put_raw('bucket', 'key', encode_json({ some_values => [1,2,3] }), 'application/json');
   $client->put_raw('bucket', 'key', 'text');
@@ -303,13 +238,13 @@ C<_bin>, depending if the index type is integer or binary.
 
 To query secondary indexes, see C<query_index>.
 
-=head2 del
+=head2 del ( $bucket, $key, [ $cb->() ] )
 
   $client->del(bucket => key);
 
 Perform a delete operation. Expects bucket and key names.
 
-=head2 get_keys
+=head2 get_keys( $bucket, $cb->($key, $bool) )
 
   # in default mode
   $client->get_keys(foo => sub{
@@ -317,15 +252,6 @@ Perform a delete operation. Expects bucket and key names.
      # you should use another client inside this callback!
      $another_client->del(foo => $key);
   });
-
-  # in anyevent mode
-  my $cv = AE::cv;
-  $client->get_keys(foo => sub{
-     my ($key, $done) = @_;
-     # ... do stuff with $key
-     $done and $cv->send;
-  });
-  $cv->recv();
 
 B<WARNING>, this method should not be called on a production Riak cluster, as
 it can have a big performance impact. See Riak's documentation.
@@ -335,25 +261,25 @@ C<Riak::Client> instance inside the callback, it would raise an exception.
 
 Perform a list keys operation. Receive a callback and will call it for each
 key. The callback will receive two arguments: the key, and a boolean indicating
-if it's the last key
+if it's the last key.
 
-The callback is optional, in which case an ArrayRef of B<all> the keys are
-returned. But don't do that, and always provide a callback, to avoid your RAM
-usage to skyrocket...
+The callback is optional. If not provided C<get_keys()> will return an ArrayRef
+of B<all> the keys. Don't do that, and always provide a callback, to avoid your
+RAM usage to skyrocket...
 
-=head2 exists
+=head2 exists($bucket, $key, [ $cb->($bool) ] )
 
   $client->exists(bucket => 'key') or warn "key not found";
-  
+
 Perform a fetch operation but with head => 0, and the if there is something
 stored in the bucket/key.
 
-=head2 query_index
+=head2 query_index( $bucket, $index, $value, [ $cb->($key) ] )
 
 Perform a secondary index (2i) query. Expects a bucket name, the index field
 name, the index value you're searching on, and optionally a callback.
 
-If a callback has been provided, doesn't return anything, but execute the
+If a callback has been provided, doesn't return anything, but executes the
 callback on each matching keys. callback will receive the key name as first
 argument. key name will also be in C<$_>. If no callback is provided, returns
 and ArrayRef of matching keys.
@@ -374,52 +300,72 @@ Based on the example in C<put>, here is how to query it:
   # range match with callback
   $client->query_index( 'bucket',  'field2_int', [ 40, 50], sub { print "key : $_" } ),
 
-=head2 get_buckets
+=head2 get_buckets( [ $cb->($buckets) ] )
 
 B<WARNING>, this method should not be called on a production Riak cluster, as
 it can have a big performance impact. See Riak's documentation.
 
-=head2 get_bucket_props
+=head2 get_bucket_props($bucket, [ $cb->($properties) ] )
 
-=head2 set_bucket_props
+=head2 set_bucket_props($bucket, $properties)
 
 =head2 map_reduce
 
-=head2 map_reduce_raw
+Perform a map/reduce operation.
+
+  # using a javascript function
+  my $json_hash = {
+      inputs => 'training',
+      query => [{
+        map => {
+          language =>"javascript",
+          source =>"function(riakObject) {
+            var val = riakObject.values[0].data.match(/pizza/g);
+            return [[riakObject.key, (val ? val.length : 0 )]];
+          }"
+        }
+      }]
+  };
+
+  # using an erlang function
+  my $json_hash = {
+      inputs => 'messages',
+      query => [{
+        map => {
+          language => 'erlang',
+          module => 'mr_example',
+          function => 'get_keys'
+        }
+      }]
+  };
+
+  $client->map_reduce($json_hash, sub { ... });
 
 =head1 BENCHMARKS
 
 Note: These benchmarks are the one provided by C<Riak::Light>.
 
-Note: the AnyEvent mode is a bit slower below, because we are forcing
-synchronous mode, even in AnyEvent, so the benchmark is paying the price of
-having AnyEvent enabled but not used.
-
 =head2 GETS
 
-                                  Rate Data::Riak (REST) Riak::Tiny (REST) Net::Riak (REST) Data::Riak::Fast (REST) Net::Riak (PBC) Riak::Client (PBC + AnyEvent) Riak::Light (PBC) Riak::Client (PBC)
-  Data::Riak (REST)              427/s                --              -30%             -31%                    -43%            -65%                          -85%              -90%               -91%
-  Riak::Tiny (REST)              611/s               43%                --              -2%                    -19%            -51%                          -79%              -86%               -87%
-  Net::Riak (REST)               623/s               46%                2%               --                    -17%            -50%                          -78%              -86%               -87%
-  Data::Riak::Fast (REST)        755/s               77%               24%              21%                      --            -39%                          -74%              -83%               -84%
-  Net::Riak (PBC)               1238/s              190%              103%              99%                     64%              --                          -57%              -72%               -74%
-  Riak::Client (PBC + AnyEvent) 2878/s              573%              371%             362%                    281%            132%                            --              -34%               -39%
-  Riak::Light (PBC)             4348/s              917%              612%             598%                    476%            251%                           51%                --                -8%
-  Riak::Client (PBC)            4706/s             1001%              671%             655%                    524%            280%                           64%                8%                 --
-
+                                  Rate Data::Riak (REST) Riak::Tiny (REST) Net::Riak (REST) Data::Riak::Fast (REST) Net::Riak (PBC) Riak::Client Riak::Light (PBC) Riak::Client (PBC)
+  Data::Riak (REST)              427/s                --              -30%             -31%                    -43%            -65%                           -90%               -91%
+  Riak::Tiny (REST)              611/s               43%                --              -2%                    -19%            -51%                           -86%               -87%
+  Net::Riak (REST)               623/s               46%                2%               --                    -17%            -50%                           -86%               -87%
+  Data::Riak::Fast (REST)        755/s               77%               24%              21%                      --            -39%                           -83%               -84%
+  Net::Riak (PBC)               1238/s              190%              103%              99%                     64%              --                           -72%               -74%
+  Riak::Light (PBC)             4348/s              917%              612%             598%                    476%            251%                             --                -8%
+  Riak::Client (PBC)            4706/s             1001%              671%             655%                    524%            280%                             8%                 --
 
 =head2 PUTS
 
-                                  Rate Net::Riak (REST) Data::Riak (REST) Riak::Tiny (REST) Data::Riak::Fast (REST) Net::Riak (PBC) Riak::Light (PBC) Riak::Client (PBC + AnyEvent) Riak::Client (PBC)
-  Net::Riak (REST)               542/s               --              -15%              -29%                    -55%            -57%              -90%                          -92%               -92%
-  Data::Riak (REST)              635/s              17%                --              -17%                    -47%            -49%              -89%                          -90%               -90%
-  Riak::Tiny (REST)              765/s              41%               20%                --                    -36%            -39%              -86%                          -88%               -88%
-  Data::Riak::Fast (REST)       1198/s             121%               89%               57%                      --             -4%              -79%                          -82%               -82%
-  Net::Riak (PBC)               1254/s             131%               97%               64%                      5%              --              -78%                          -81%               -81%
-  Riak::Light (PBC)             5634/s             939%              787%              637%                    370%            349%                --                          -14%               -14%
-  Riak::Client (PBC + AnyEvent) 6557/s            1110%              933%              757%                    448%            423%               16%                            --                 0%
-  Riak::Client (PBC)            6557/s            1110%              933%              757%                    448%            423%               16%                            0%                 --
-
+                                  Rate Net::Riak (REST) Data::Riak (REST) Riak::Tiny (REST) Data::Riak::Fast (REST) Net::Riak (PBC) Riak::Light (PBC) Riak::Client (PBC)
+  Net::Riak (REST)               542/s               --              -15%              -29%                    -55%            -57%              -90%               -92%
+  Data::Riak (REST)              635/s              17%                --              -17%                    -47%            -49%              -89%               -90%
+  Riak::Tiny (REST)              765/s              41%               20%                --                    -36%            -39%              -86%               -88%
+  Data::Riak::Fast (REST)       1198/s             121%               89%               57%                      --             -4%              -79%               -82%
+  Net::Riak (PBC)               1254/s             131%               97%               64%                      5%              --              -78%               -81%
+  Riak::Light (PBC)             5634/s             939%              787%              637%                    370%            349%                --               -14%
+  Riak::Client (PBC)            6557/s            1110%              933%              757%                    448%            423%               16%                 --
 
 =for Pod::Coverage BUILD
 
@@ -435,7 +381,9 @@ L<Action::Retry>
 
 L<Riak::Light>
 
-L<AnyEvent>
+=head1 CONTRIBUTORS
+
+Ivan Kruglov <ivan.kruglov@yahoo.com>
 
 =head1 AUTHOR
 
@@ -448,6 +396,4 @@ This software is copyright (c) 2014 by Damien Krotkine.
 This is free software; you can redistribute it and/or modify it under
 the same terms as the Perl 5 programming language system itself.
 
-=head1 CONTRIBUTORS
-  
-Ivan Kruglov <ivan.kruglov@yahoo.com>
+=cut

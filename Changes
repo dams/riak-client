@@ -1,4 +1,5 @@
 {{$NEXT}}
+   * removed support for AnyEvent, it'll be provided as a separate module
 
 1.94      2014-07-23 14:29:18 Europe/Amsterdam
 
