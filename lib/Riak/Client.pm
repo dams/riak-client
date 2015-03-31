@@ -798,8 +798,7 @@ sub _handle_get_bucket_props_response {
 
 sub set_bucket_props {
     state $check = compile( Any, Str, 
-                            Dict[ n_val => Optional[Int],
-                                  allow_mult => Optional[Bool] ],
+                            Dict,
                             Optional[CodeRef] );
     my ( $self, $bucket, $props, $cb ) = $check->(@_);
     $props->{n_val} && $props->{n_val} < 0 and croak 'n_val should be possitive integer';

@@ -196,7 +196,9 @@ subtest "get/set buckets props" => sub {
     my @props = map { $client->get_bucket_props($_) } @buckets;
 
     is( scalar @props, scalar @buckets);
-    is_deeply($_, $exp_props, "wrong props structure") foreach (@props);
+    foreach my $p (@props) {
+        is_deeply( { map { $_ => $p->{$_} } keys %$exp_props }, $exp_props, "wrong props structure")
+    }
 };
 
 END {
