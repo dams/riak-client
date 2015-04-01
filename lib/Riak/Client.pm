@@ -153,10 +153,10 @@ has port    => ( is => 'ro', isa => Int,  required => 1 );
 has r       => ( is => 'ro', isa => Int,  default  => sub {2} );
 has w       => ( is => 'ro', isa => Int,  default  => sub {2} );
 has dw      => ( is => 'ro', isa => Int,  default  => sub {1} );
-has connection_timeout => ( is => 'ro',                 isa => Num,  default  => sub {5} );
-has read_timeout       => ( is => 'ro', predicate => 1, isa => Num,  default  => sub {5} );
-has write_timeout      => ( is => 'ro', predicate => 1, isa => Num,  default  => sub {5} );
-has no_delay           => ( is => 'ro',                 isa => Bool, default  => sub {0} );
+has connection_timeout => ( is => 'ro', isa => Num,  default  => sub {5} );
+has read_timeout       => ( is => 'ro', isa => Num,  default  => sub {5} );
+has write_timeout      => ( is => 'ro', isa => Num,  default  => sub {5} );
+has no_delay           => ( is => 'ro', isa => Bool, default  => sub {0} );
 
 =attr no_auto_connect
 
@@ -187,16 +187,13 @@ sub _build__socket {
     croak "Error ($!), can't connect to $host:$port"
       unless defined $socket;
 
-    $self->has_read_timeout || $self->has_write_timeout
-      or return $socket;
-
-    # enable read and write timeouts on the socket
-    IO::Socket::Timeout->enable_timeouts_on($socket);
-    # setup the timeouts
-    $self->has_read_timeout
-      and $socket->read_timeout($self->read_timeout);
-    $self->has_write_timeout
-      and $socket->write_timeout($self->write_timeout);
+    if ($self->read_timeout || $self->write_timeout) {
+        # enable read and write timeouts on the socket
+        IO::Socket::Timeout->enable_timeouts_on($socket);
+        # setup the timeouts
+        $socket->read_timeout($self->read_timeout);
+        $socket->write_timeout($self->write_timeout);
+    }
 
     use Socket qw(IPPROTO_TCP TCP_NODELAY);
     $self->no_delay
